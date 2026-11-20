@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# Build & Binaries
+build/
+dist/
+*.spec
+*.exe
+*.exe.old
+
+# Local settings & Excel data files
+worklog_report_settings.json
+*.xlsx
+*.xls
+*.csv
