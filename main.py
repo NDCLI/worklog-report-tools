@@ -530,7 +530,7 @@ class MainWindow(QMainWindow):
         # Tab 1: Task (Workers only)
         self.tbl_t1 = QTableWidget()
         self._setup_table(self.tbl_t1)
-        self.del_t1 = ReportTableDelegate(divider_col=[7, 11, 12], parent=self.tbl_t1)
+        self.del_t1 = ReportTableDelegate(divider_col=[9, 13, 14], parent=self.tbl_t1)
         self.tbl_t1.setItemDelegate(self.del_t1)
         self.tbl_t1.cellDoubleClicked.connect(self._on_t1_double_click)
         self.tabs.addTab(self.tbl_t1, "Task")
@@ -538,7 +538,7 @@ class MainWindow(QMainWindow):
         # Tab 2: Annotator (Workers only)
         self.tbl_t2 = QTableWidget()
         self._setup_table(self.tbl_t2)
-        self.del_t2 = ReportTableDelegate(divider_col=6, parent=self.tbl_t2)
+        self.del_t2 = ReportTableDelegate(divider_col=8, parent=self.tbl_t2)
         self.tbl_t2.setItemDelegate(self.del_t2)
         self.tbl_t2.cellDoubleClicked.connect(self._on_t2_double_click)
         self.tabs.addTab(self.tbl_t2, "Annotator")
@@ -1290,17 +1290,19 @@ class MainWindow(QMainWindow):
             "Work\nLoad",
             "Work\nBBOX",
             "Work\nTime",
-            f"{err_prefix}\nFrame",
-            f"{err_prefix}\nBBOX",
+            "1st Err\n(BBOX)",
+            "2nd Err\n(BBOX)",
+            "1st Err\n(Frame)",
+            "2nd Err\n(Frame)",
             "FRAME\n/ Hour",
             "BBOX\n/ Hour",
-            "Err Rate\nFrame (%)",
             "Err Rate\nBBOX (%)",
+            "Err Rate\nFrame (%)",
             "TASK",
             "Avg\nFrame/h",
             "Avg\nBBOX/h",
-            "Err Rate\nFrame (%)",
             "Err Rate\nBBOX (%)",
+            "Err Rate\nFrame (%)",
         ]
         total_rows = sum(len(g.rows) for g in groups)
         tbl.setColumnCount(len(headers))
@@ -1320,14 +1322,11 @@ class MainWindow(QMainWindow):
                 row_i = cur + idx
                 row_bg, prefix_ic = self._row_status_style(r, hl)
                 kpi_bg = t["tbl_kpi_bg"]
-                if r.is_reviewer:
-                    err_info = f"Reviewer Lần 1 (chỉ tính lỗi Pangyo): Frame = {_fmt_int(r.total_err_frame)} | BBOX = {_fmt_int(r.total_err_bbox)}"
-                else:
-                    err_info = (
-                        f"Worker (Lần 1 + Pangyo):\n"
-                        f"  • Lỗi Frame: {_fmt_int(r.total_err_frame)} (Lần 1: {_fmt_int(r.err_first)} + Pangyo: {_fmt_int(r.err_second)})\n"
-                        f"  • Lỗi BBOX:  {_fmt_int(r.total_err_bbox)} (Lần 1: {_fmt_int(r.err_first_bbox)} + Pangyo: {_fmt_int(r.err_second_bbox)})"
-                    )
+                err_info = (
+                    f"Worker (Lần 1 + Pangyo):\n"
+                    f"  • Lỗi BBOX:  {_fmt_int(r.total_err_bbox)} (Lần 1: {_fmt_int(r.err_first_bbox)} + Pangyo: {_fmt_int(r.err_second_bbox)})\n"
+                    f"  • Lỗi Frame: {_fmt_int(r.total_err_frame)} (Lần 1: {_fmt_int(r.err_first)} + Pangyo: {_fmt_int(r.err_second)})"
+                )
                 tip = self._build_mismatch_tooltip(r, prefix=err_info)
                 has_any_issue = (r.has_mismatch or r.has_pending)
 
@@ -1339,32 +1338,31 @@ class MainWindow(QMainWindow):
                 tbl.setItem(row_i, 2, self._make_item(_fmt_int(r.work_load), bg=row_bg, tooltip=tip))
                 tbl.setItem(row_i, 3, self._make_item(_fmt_int(r.work_bbox), bg=row_bg, tooltip=tip))
                 tbl.setItem(row_i, 4, self._make_item(_fmt_time(r.work_time), tooltip=tip))
-                tbl.setItem(row_i, 5, self._make_item(_fmt_int(r.total_err_frame), tooltip=tip))
-                tbl.setItem(row_i, 6, self._make_item(_fmt_int(r.total_err_bbox), tooltip=tip))
-                tbl.setItem(row_i, 7, self._make_item(_fmt_f2(r.frame_per_hour), bold=True, bg=kpi_bg))
-                tbl.setItem(row_i, 8, self._make_item(_fmt_f2(r.bbox_per_hour), bold=True, bg=kpi_bg))
-                tbl.setItem(row_i, 9, self._make_item(_fmt_f2(r.total_err_rate), bold=True, fg=t["danger"], tooltip=tip))
-                tbl.setItem(row_i, 10, self._make_item(_fmt_f2(r.total_err_bbox_rate), bold=True, fg=t["danger"], tooltip=tip))
+                tbl.setItem(row_i, 5, self._make_item(_fmt_int(r.err_first_bbox), tooltip=tip))
+                tbl.setItem(row_i, 6, self._make_item(_fmt_int(r.err_second_bbox), tooltip=tip))
+                tbl.setItem(row_i, 7, self._make_item(_fmt_int(r.err_first), tooltip=tip))
+                tbl.setItem(row_i, 8, self._make_item(_fmt_int(r.err_second), tooltip=tip))
+                tbl.setItem(row_i, 9, self._make_item(_fmt_f2(r.frame_per_hour), bold=True, bg=kpi_bg))
+                tbl.setItem(row_i, 10, self._make_item(_fmt_f2(r.bbox_per_hour), bold=True, bg=kpi_bg))
+                tbl.setItem(row_i, 11, self._make_item(_fmt_f2(r.total_err_bbox_rate), bold=True, fg=t["danger"], tooltip=tip))
+                tbl.setItem(row_i, 12, self._make_item(_fmt_f2(r.total_err_rate), bold=True, fg=t["danger"], tooltip=tip))
 
             avg_tip = (
                 f"Chỉ số trung bình & tỉ lệ lỗi của toàn bộ nhóm TASK {disp_task} ({n} người):\n"
                 f"  • Tổng Frame: {_fmt_int(grp.total_work_load)} | Tổng BBOX: {_fmt_int(grp.total_work_bbox)} | Tổng Time: {_fmt_time(grp.total_work_time)}h\n"
-                f"  • Tổng lỗi Frame: {_fmt_int(grp.total_err_frame)} ({_fmt_f2(grp.total_task_err_rate)}%) | Tổng lỗi BBOX: {_fmt_int(grp.total_err_bbox)} ({_fmt_f2(grp.total_task_err_bbox_rate)}%)"
+                f"  • Tổng lỗi BBOX: {_fmt_int(grp.total_err_bbox)} ({_fmt_f2(grp.total_task_err_bbox_rate)}%) | Tổng lỗi Frame: {_fmt_int(grp.total_err_frame)} ({_fmt_f2(grp.total_task_err_rate)}%)"
             )
             avg_align = Qt.AlignmentFlag.AlignCenter
-            tbl.setItem(start_r, 11, self._make_item(disp_task, avg_align, True, t["task_badge_fg"], t["task_badge_bg"], tooltip=avg_tip))
-            tbl.setItem(start_r, 12, self._make_item(_fmt_f2(grp.avg_frame_per_hour), avg_align, True, t["danger"], bg=task_avg_bg, tooltip=avg_tip))
-            tbl.setItem(start_r, 13, self._make_item(_fmt_f2(grp.avg_bbox_per_hour), avg_align, True, t["danger"], bg=task_avg_bg, tooltip=avg_tip))
-            tbl.setItem(start_r, 14, self._make_item(_fmt_f2(grp.total_task_err_rate), avg_align, True, t["danger"], bg=task_avg_bg, tooltip=avg_tip))
-            tbl.setItem(start_r, 15, self._make_item(_fmt_f2(grp.total_task_err_bbox_rate), avg_align, True, t["danger"], bg=task_avg_bg, tooltip=avg_tip))
+            tbl.setItem(start_r, 13, self._make_item(disp_task, avg_align, True, t["task_badge_fg"], t["task_badge_bg"], tooltip=avg_tip))
+            tbl.setItem(start_r, 14, self._make_item(_fmt_f2(grp.avg_frame_per_hour), avg_align, True, t["danger"], bg=task_avg_bg, tooltip=avg_tip))
+            tbl.setItem(start_r, 15, self._make_item(_fmt_f2(grp.avg_bbox_per_hour), avg_align, True, t["danger"], bg=task_avg_bg, tooltip=avg_tip))
+            tbl.setItem(start_r, 16, self._make_item(_fmt_f2(grp.total_task_err_bbox_rate), avg_align, True, t["danger"], bg=task_avg_bg, tooltip=avg_tip))
+            tbl.setItem(start_r, 17, self._make_item(_fmt_f2(grp.total_task_err_rate), avg_align, True, t["danger"], bg=task_avg_bg, tooltip=avg_tip))
 
             if n > 1:
                 tbl.setSpan(start_r, 0, n, 1)
-                tbl.setSpan(start_r, 11, n, 1)
-                tbl.setSpan(start_r, 12, n, 1)
-                tbl.setSpan(start_r, 13, n, 1)
-                tbl.setSpan(start_r, 14, n, 1)
-                tbl.setSpan(start_r, 15, n, 1)
+                for c in (13, 14, 15, 16, 17):
+                    tbl.setSpan(start_r, c, n, 1)
             cur += n
 
         delegate.set_group_bottom_rows(group_bottoms)
@@ -1372,10 +1370,10 @@ class MainWindow(QMainWindow):
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        hdr.setSectionResizeMode(11, QHeaderView.ResizeMode.Fixed)
-        tbl.setColumnWidth(0, 68)
-        tbl.setColumnWidth(1, 94)
-        tbl.setColumnWidth(11, 68)
+        hdr.setSectionResizeMode(13, QHeaderView.ResizeMode.Fixed)
+        tbl.setColumnWidth(0, 62)
+        tbl.setColumnWidth(1, 90)
+        tbl.setColumnWidth(13, 62)
         hdr.setFixedHeight(44)
 
     def _render_person_summary_table(self, tbl: QTableWidget, delegate: ReportTableDelegate, rows, name_col_hdr: str = "Annotator", err_prefix: str = "Err"):
@@ -1385,12 +1383,14 @@ class MainWindow(QMainWindow):
             "Work\nLoad",
             "Work\nBBOX",
             "Work\nTime",
-            f"{err_prefix}\nFrame",
-            f"{err_prefix}\nBBOX",
+            "1st Err\n(BBOX)",
+            "2nd Err\n(BBOX)",
+            "1st Err\n(Frame)",
+            "2nd Err\n(Frame)",
             "FRAME Per\nHour",
             "BBOX Per\nHour",
-            "Err Rate\nFrame (%)",
             "Err Rate\nBBOX (%)",
+            "Err Rate\nFrame (%)",
         ]
         tbl.setColumnCount(len(headers))
         tbl.setHorizontalHeaderLabels(headers)
@@ -1401,10 +1401,7 @@ class MainWindow(QMainWindow):
         for row_i, r in enumerate(rows):
             row_bg, prefix_ic = self._row_status_style(r, hl)
             kpi_bg = t["tbl_kpi_bg"]
-            if r.is_reviewer:
-                role_s = f"[Reviewer Lần 1 — {r.task}] Lỗi Pangyo: Frame={_fmt_int(r.total_err_frame)}, BBOX={_fmt_int(r.total_err_bbox)}"
-            else:
-                role_s = f"[Worker — {r.task}] Lỗi Lần 1 + Pangyo: Frame={_fmt_int(r.total_err_frame)}, BBOX={_fmt_int(r.total_err_bbox)}"
+            role_s = f"[Worker — {r.task}] Lỗi BBOX={_fmt_int(r.total_err_bbox)} ({_fmt_int(r.err_first_bbox)}+{_fmt_int(r.err_second_bbox)}) | Lỗi Frame={_fmt_int(r.total_err_frame)} ({_fmt_int(r.err_first)}+{_fmt_int(r.err_second)})"
             tip = self._build_mismatch_tooltip(r, prefix=role_s)
             lbl = f"{prefix_ic}{r.annotator}"
             has_any_issue = (r.has_mismatch or r.has_pending)
@@ -1413,18 +1410,20 @@ class MainWindow(QMainWindow):
             tbl.setItem(row_i, 1, self._make_item(_fmt_int(r.work_load), bg=row_bg, tooltip=tip))
             tbl.setItem(row_i, 2, self._make_item(_fmt_int(r.work_bbox), bg=row_bg, tooltip=tip))
             tbl.setItem(row_i, 3, self._make_item(_fmt_time(r.work_time), tooltip=tip))
-            tbl.setItem(row_i, 4, self._make_item(_fmt_int(r.total_err_frame), tooltip=tip))
-            tbl.setItem(row_i, 5, self._make_item(_fmt_int(r.total_err_bbox), tooltip=tip))
-            tbl.setItem(row_i, 6, self._make_item(_fmt_f2(r.frame_per_hour), bold=True, bg=kpi_bg))
-            tbl.setItem(row_i, 7, self._make_item(_fmt_f2(r.bbox_per_hour), bold=True, bg=kpi_bg))
-            tbl.setItem(row_i, 8, self._make_item(_fmt_f2(r.total_err_rate), bold=True, fg=t["danger"], tooltip=tip))
-            tbl.setItem(row_i, 9, self._make_item(_fmt_f2(r.total_err_bbox_rate), bold=True, fg=t["danger"], tooltip=tip))
+            tbl.setItem(row_i, 4, self._make_item(_fmt_int(r.err_first_bbox), tooltip=tip))
+            tbl.setItem(row_i, 5, self._make_item(_fmt_int(r.err_second_bbox), tooltip=tip))
+            tbl.setItem(row_i, 6, self._make_item(_fmt_int(r.err_first), tooltip=tip))
+            tbl.setItem(row_i, 7, self._make_item(_fmt_int(r.err_second), tooltip=tip))
+            tbl.setItem(row_i, 8, self._make_item(_fmt_f2(r.frame_per_hour), bold=True, bg=kpi_bg))
+            tbl.setItem(row_i, 9, self._make_item(_fmt_f2(r.bbox_per_hour), bold=True, bg=kpi_bg))
+            tbl.setItem(row_i, 10, self._make_item(_fmt_f2(r.total_err_bbox_rate), bold=True, fg=t["danger"], tooltip=tip))
+            tbl.setItem(row_i, 11, self._make_item(_fmt_f2(r.total_err_rate), bold=True, fg=t["danger"], tooltip=tip))
 
         delegate.set_group_bottom_rows(set())
         hdr = tbl.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        tbl.setColumnWidth(0, 120)
+        tbl.setColumnWidth(0, 110)
         hdr.setFixedHeight(44)
 
     def _render_template1(self, rep: ReportResult):
@@ -1452,8 +1451,8 @@ class MainWindow(QMainWindow):
             "2nd Insp.\nError (Fr)",
             "FRAME\n/ Hour",
             "BBOX\n/ Hour",
-            "Err Rate\nFrame (%)",
             "Err Rate\nBBOX (%)",
+            "Err Rate\nFrame (%)",
             "1st Inspector\nRecall (%)",
         ]
         groups = rep.inspector_groups
@@ -1496,8 +1495,8 @@ class MainWindow(QMainWindow):
             c_align = Qt.AlignmentFlag.AlignCenter
             tbl.setItem(start_r, 7, self._make_item(_fmt_f2(grp.frame_per_hour), c_align, True, t["danger"], bg=kpi_bg, tooltip=sum_tip))
             tbl.setItem(start_r, 8, self._make_item(_fmt_f2(grp.bbox_per_hour), c_align, True, t["danger"], bg=kpi_bg, tooltip=sum_tip))
-            tbl.setItem(start_r, 9, self._make_item(_fmt_f2(grp.err_rate_frame), c_align, True, None, bg=kpi_bg, tooltip=sum_tip))
-            tbl.setItem(start_r, 10, self._make_item(_fmt_f2(grp.err_rate_bbox), c_align, True, None, bg=kpi_bg, tooltip=sum_tip))
+            tbl.setItem(start_r, 9, self._make_item(_fmt_f2(grp.err_rate_bbox), c_align, True, None, bg=kpi_bg, tooltip=sum_tip))
+            tbl.setItem(start_r, 10, self._make_item(_fmt_f2(grp.err_rate_frame), c_align, True, None, bg=kpi_bg, tooltip=sum_tip))
             tbl.setItem(start_r, 11, self._make_item(f"{grp.first_inspector_recall:.0f}%", c_align, True, t["accent_text"], bg=kpi_bg, tooltip=sum_tip))
 
             if n > 1:
@@ -1530,8 +1529,8 @@ class MainWindow(QMainWindow):
             tbl.setItem(tr, 6, self._make_item(_fmt_int(tot_e2), bold=True, bg=tot_bg))
             tbl.setItem(tr, 7, self._make_item(_fmt_f2(tot_fph), Qt.AlignmentFlag.AlignCenter, True, t["danger"], bg=tot_bg))
             tbl.setItem(tr, 8, self._make_item(_fmt_f2(tot_bph), Qt.AlignmentFlag.AlignCenter, True, t["danger"], bg=tot_bg))
-            tbl.setItem(tr, 9, self._make_item(_fmt_f2(tot_er_fr), Qt.AlignmentFlag.AlignCenter, True, bg=tot_bg))
-            tbl.setItem(tr, 10, self._make_item(_fmt_f2(tot_er_bb), Qt.AlignmentFlag.AlignCenter, True, bg=tot_bg))
+            tbl.setItem(tr, 9, self._make_item(_fmt_f2(tot_er_bb), Qt.AlignmentFlag.AlignCenter, True, bg=tot_bg))
+            tbl.setItem(tr, 10, self._make_item(_fmt_f2(tot_er_fr), Qt.AlignmentFlag.AlignCenter, True, bg=tot_bg))
             tbl.setItem(tr, 11, self._make_item(f"{tot_rec:.0f}%", Qt.AlignmentFlag.AlignCenter, True, t["accent_text"], bg=tot_bg))
 
         self.del_rev.set_group_bottom_rows(group_bottoms)

@@ -8,6 +8,7 @@ from data_engine import ReportResult
 
 DARK_HEADER_FILL = PatternFill(start_color="333333", end_color="333333", fill_type="solid")
 SUBHEADER_FILL = PatternFill(start_color="444444", end_color="444444", fill_type="solid")
+SUB_HEADER_FILL = SUBHEADER_FILL
 WARN_FILL = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
 INFO_FILL = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
 OK_FILL = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
@@ -20,6 +21,7 @@ FONT_REGULAR = Font(name="Times New Roman", size=10, bold=False, color="000000")
 FONT_BOLD = Font(name="Times New Roman", size=10, bold=True, color="000000")
 FONT_RED = Font(name="Times New Roman", size=10, bold=False, color="C00000")
 FONT_RED_BOLD = Font(name="Times New Roman", size=10, bold=True, color="C00000")
+FONT_GREEN_BOLD = Font(name="Times New Roman", size=10, bold=True, color="375623")
 FONT_WARN = Font(name="Segoe UI", size=10, bold=True, color="9C6500")
 FONT_INFO = Font(name="Segoe UI", size=10, bold=True, color="1F4E78")
 FONT_OK = Font(name="Segoe UI", size=10, bold=True, color="375623")
@@ -54,17 +56,17 @@ def _write_template1_by_task(wb: openpyxl.Workbook, report: ReportResult, highli
     title_text = f"{report.start_date.strftime('%Y.%m.%d')} ~ {report.end_date.strftime('%Y.%m.%d')}"
 
     # Row 1: Title banner
-    ws.merge_cells("A1:P1")
+    ws.merge_cells("A1:R1")
     ws["A1"] = title_text
     ws["A1"].font = FONT_TITLE
     ws["A1"].fill = DARK_HEADER_FILL
     ws["A1"].alignment = ALIGN_CENTER
     ws.row_dimensions[1].height = 28
-    for c in range(1, 17):
+    for c in range(1, 19):
         ws.cell(1, c).fill = DARK_HEADER_FILL
         ws.cell(1, c).border = _make_border(
             left=MEDIUM_BLACK if c == 1 else THIN_BLACK,
-            right=MEDIUM_BLACK if c == 16 else THIN_BLACK,
+            right=MEDIUM_BLACK if c == 18 else THIN_BLACK,
             top=MEDIUM_BLACK,
             bottom=THIN_BLACK,
         )
@@ -76,17 +78,19 @@ def _write_template1_by_task(wb: openpyxl.Workbook, report: ReportResult, highli
         "Work Load",
         "Work BBOX",
         "Work Time",
-        "Err\nFrame",
-        "Err\nBBOX",
+        "1st Err\n(BBOX)",
+        "2nd Err\n(BBOX)",
+        "1st Err\n(Frame)",
+        "2nd Err\n(Frame)",
         "FRAME Per\nHour",
         "BBOX Per\nHour",
-        "Err Rate\nFrame (%)",
         "Err Rate\nBBOX (%)",
+        "Err Rate\nFrame (%)",
         "TASK",
         "Avg\nFrame/h",
         "Avg\nBBOX/h",
-        "Err Rate\nFrame (%)",
         "Err Rate\nBBOX (%)",
+        "Err Rate\nFrame (%)",
     ]
     ws.row_dimensions[2].height = 54
     for c, h in enumerate(headers, start=1):
@@ -95,8 +99,8 @@ def _write_template1_by_task(wb: openpyxl.Workbook, report: ReportResult, highli
         cell.fill = DARK_HEADER_FILL
         cell.alignment = ALIGN_CENTER
         cell.border = _make_border(
-            left=MEDIUM_BLACK if c in (1, 8, 12, 13) else THIN_BLACK,
-            right=MEDIUM_BLACK if c in (7, 11, 12, 16) else THIN_BLACK,
+            left=MEDIUM_BLACK if c in (1, 10, 14, 15) else THIN_BLACK,
+            right=MEDIUM_BLACK if c in (9, 13, 14, 18) else THIN_BLACK,
             top=THIN_BLACK,
             bottom=MEDIUM_BLACK,
         )
@@ -117,33 +121,34 @@ def _write_template1_by_task(wb: openpyxl.Workbook, report: ReportResult, highli
             ws.cell(r, 3, _clean_num(rdata.work_load))
             ws.cell(r, 4, _clean_num(rdata.work_bbox))
             ws.cell(r, 5, _clean_num(rdata.work_time))
-            ws.cell(r, 6, _clean_num(rdata.total_err_frame))
-            ws.cell(r, 7, _clean_num(rdata.total_err_bbox))
+            ws.cell(r, 6, _clean_num(rdata.err_first_bbox))
+            ws.cell(r, 7, _clean_num(rdata.err_second_bbox))
+            ws.cell(r, 8, _clean_num(rdata.err_first))
+            ws.cell(r, 9, _clean_num(rdata.err_second))
 
             # Live Excel formulas for KPIs
-            ws.cell(r, 8, f"=IF(E{r}>0,C{r}/E{r},0)")
-            ws.cell(r, 9, f"=IF(E{r}>0,D{r}/E{r},0)")
-            ws.cell(r, 10, f"=IF(C{r}>0,F{r}/C{r}*100,0)")
-            ws.cell(r, 11, f"=IF(D{r}>0,G{r}/D{r}*100,0)")
-            ws.cell(r, 12, grp.task if is_first else None)
+            ws.cell(r, 10, f"=IF(E{r}>0,C{r}/E{r},0)")
+            ws.cell(r, 11, f"=IF(E{r}>0,D{r}/E{r},0)")
+            ws.cell(r, 12, f"=IF(D{r}>0,(F{r}+G{r})/D{r}*100,0)")
+            ws.cell(r, 13, f"=IF(C{r}>0,(H{r}+I{r})/C{r}*100,0)")
+            ws.cell(r, 14, grp.task if is_first else None)
 
-            for c in range(1, 17):
+            for c in range(1, 19):
                 cell = ws.cell(r, c)
                 top_b = MEDIUM_BLACK if is_first else THIN_GRAY
                 bot_b = MEDIUM_BLACK if is_last else THIN_GRAY
-                if c in (1, 12, 13, 14, 15, 16):
-                    # Merged cells keep outer borders cleanly
-                    left_b = MEDIUM_BLACK if c in (1, 12, 13) else THIN_BLACK
-                    right_b = MEDIUM_BLACK if c in (1, 12, 16) else THIN_BLACK
+                if c in (1, 14, 15, 16, 17, 18):
+                    left_b = MEDIUM_BLACK if c in (1, 14, 15) else THIN_BLACK
+                    right_b = MEDIUM_BLACK if c in (1, 14, 18) else THIN_BLACK
                     cell.border = _make_border(left=left_b, right=right_b, top=top_b, bottom=bot_b)
-                    if c in (13, 14, 15, 16):
+                    if c >= 15:
                         cell.fill = ZEBRA_FILL
                 else:
-                    left_b = MEDIUM_BLACK if c == 8 else THIN_GRAY
-                    right_b = MEDIUM_BLACK if c in (7, 11) else THIN_GRAY
+                    left_b = MEDIUM_BLACK if c == 10 else THIN_GRAY
+                    right_b = MEDIUM_BLACK if c in (9, 13) else THIN_GRAY
                     cell.border = _make_border(left=left_b, right=right_b, top=top_b, bottom=bot_b)
 
-                if c in (1, 12):
+                if c in (1, 14):
                     cell.fill = DARK_HEADER_FILL
                     cell.font = FONT_TASK
                     cell.alignment = ALIGN_CENTER
@@ -152,43 +157,39 @@ def _write_template1_by_task(wb: openpyxl.Workbook, report: ReportResult, highli
                     cell.alignment = ALIGN_CENTER
                     if highlight_mismatch and rdata.has_mismatch:
                         cell.fill = WARN_FILL
-                elif c in (3, 4, 5, 6, 7):
+                elif c in (3, 4, 5, 6, 7, 8, 9):
                     cell.font = FONT_REGULAR
                     cell.alignment = ALIGN_RIGHT
                     cell.number_format = "0.##" if c == 5 else "0"
                     if highlight_mismatch and rdata.has_mismatch and c in (3, 4):
                         cell.fill = WARN_FILL
-                elif c in (8, 9):
+                elif c in (10, 11):
                     cell.font = FONT_BOLD
                     cell.alignment = ALIGN_RIGHT
                     cell.number_format = "0.00"
-                elif c in (10, 11):
+                elif c in (12, 13):
                     cell.font = FONT_RED
                     cell.alignment = ALIGN_RIGHT
                     cell.number_format = "0.00"
 
-        # Merge TASK cols (1 and 12) and 4 Average cols (13, 14, 15, 16) for this task group
+        # Merge TASK cols (1 and 14) and 4 Average cols (15, 16, 17, 18)
         if end_r > start_r:
             ws.merge_cells(start_row=start_r, start_column=1, end_row=end_r, end_column=1)
-            ws.merge_cells(start_row=start_r, start_column=12, end_row=end_r, end_column=12)
-            ws.merge_cells(start_row=start_r, start_column=13, end_row=end_r, end_column=13)
-            ws.merge_cells(start_row=start_r, start_column=14, end_row=end_r, end_column=14)
-            ws.merge_cells(start_row=start_r, start_column=15, end_row=end_r, end_column=15)
-            ws.merge_cells(start_row=start_r, start_column=16, end_row=end_r, end_column=16)
+            for c in (14, 15, 16, 17, 18):
+                ws.merge_cells(start_row=start_r, start_column=c, end_row=end_r, end_column=c)
 
-        c13 = ws.cell(start_r, 13, f"=IF(SUM(E{start_r}:E{end_r})>0,SUM(C{start_r}:C{end_r})/SUM(E{start_r}:E{end_r}),0)")
-        c14 = ws.cell(start_r, 14, f"=IF(SUM(E{start_r}:E{end_r})>0,SUM(D{start_r}:D{end_r})/SUM(E{start_r}:E{end_r}),0)")
-        c15 = ws.cell(start_r, 15, f"=IF(SUM(C{start_r}:C{end_r})>0,SUM(F{start_r}:F{end_r})/SUM(C{start_r}:C{end_r})*100,0)")
-        c16 = ws.cell(start_r, 16, f"=IF(SUM(D{start_r}:D{end_r})>0,SUM(G{start_r}:G{end_r})/SUM(D{start_r}:D{end_r})*100,0)")
-        for avg_cell in (c13, c14, c15, c16):
+        c15 = ws.cell(start_r, 15, f"=IF(SUM(E{start_r}:E{end_r})>0,SUM(C{start_r}:C{end_r})/SUM(E{start_r}:E{end_r}),0)")
+        c16 = ws.cell(start_r, 16, f"=IF(SUM(E{start_r}:E{end_r})>0,SUM(D{start_r}:D{end_r})/SUM(E{start_r}:E{end_r}),0)")
+        c17 = ws.cell(start_r, 17, f"=IF(SUM(D{start_r}:D{end_r})>0,(SUM(F{start_r}:F{end_r})+SUM(G{start_r}:G{end_r}))/SUM(D{start_r}:D{end_r})*100,0)")
+        c18 = ws.cell(start_r, 18, f"=IF(SUM(C{start_r}:C{end_r})>0,(SUM(H{start_r}:H{end_r})+SUM(I{start_r}:I{end_r}))/SUM(C{start_r}:C{end_r})*100,0)")
+        for avg_cell in (c15, c16, c17, c18):
             avg_cell.font = FONT_RED_BOLD
             avg_cell.alignment = ALIGN_CENTER
             avg_cell.number_format = "0.00"
 
         cur_row = end_r + 1
 
-    # Column widths matching visual balance
-    widths = [11, 13, 12, 12, 11, 11, 11, 13, 13, 13, 13, 11, 13, 13, 13, 13]
+    widths = [11, 13, 12, 12, 11, 11, 11, 11, 11, 13, 13, 13, 13, 11, 13, 13, 13, 13]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "C3"
@@ -201,17 +202,17 @@ def _write_template2_by_annotator(wb: openpyxl.Workbook, report: ReportResult, h
     title_text = f"{report.start_date.strftime('%Y.%m.%d')} ~ {report.end_date.strftime('%Y.%m.%d')}"
 
     # Row 1: Title banner
-    ws.merge_cells("A1:J1")
+    ws.merge_cells("A1:L1")
     ws["A1"] = title_text
     ws["A1"].font = FONT_TITLE
     ws["A1"].fill = DARK_HEADER_FILL
     ws["A1"].alignment = ALIGN_CENTER
     ws.row_dimensions[1].height = 28
-    for c in range(1, 11):
+    for c in range(1, 13):
         ws.cell(1, c).fill = DARK_HEADER_FILL
         ws.cell(1, c).border = _make_border(
             left=MEDIUM_BLACK if c == 1 else THIN_BLACK,
-            right=MEDIUM_BLACK if c == 10 else THIN_BLACK,
+            right=MEDIUM_BLACK if c == 12 else THIN_BLACK,
             top=MEDIUM_BLACK,
             bottom=THIN_BLACK,
         )
@@ -222,12 +223,14 @@ def _write_template2_by_annotator(wb: openpyxl.Workbook, report: ReportResult, h
         "Work\nLoad",
         "Work\nBBOX",
         "Work Time",
-        "Err\nFrame",
-        "Err\nBBOX",
+        "1st Err\n(BBOX)",
+        "2nd Err\n(BBOX)",
+        "1st Err\n(Frame)",
+        "2nd Err\n(Frame)",
         "FRAME Per\nHour",
         "BBOX Per\nHour",
-        "Err Rate\nFrame (%)",
         "Err Rate\nBBOX (%)",
+        "Err Rate\nFrame (%)",
     ]
     ws.row_dimensions[2].height = 54
     for c, h in enumerate(headers, start=1):
@@ -236,8 +239,8 @@ def _write_template2_by_annotator(wb: openpyxl.Workbook, report: ReportResult, h
         cell.fill = DARK_HEADER_FILL
         cell.alignment = ALIGN_CENTER
         cell.border = _make_border(
-            left=MEDIUM_BLACK if c in (1, 7) else THIN_BLACK,
-            right=MEDIUM_BLACK if c in (6, 10) else THIN_BLACK,
+            left=MEDIUM_BLACK if c in (1, 9) else THIN_BLACK,
+            right=MEDIUM_BLACK if c in (8, 12) else THIN_BLACK,
             top=THIN_BLACK,
             bottom=MEDIUM_BLACK,
         )
@@ -251,18 +254,20 @@ def _write_template2_by_annotator(wb: openpyxl.Workbook, report: ReportResult, h
         ws.cell(r, 2, _clean_num(rdata.work_load))
         ws.cell(r, 3, _clean_num(rdata.work_bbox))
         ws.cell(r, 4, _clean_num(rdata.work_time))
-        ws.cell(r, 5, _clean_num(rdata.total_err_frame))
-        ws.cell(r, 6, _clean_num(rdata.total_err_bbox))
+        ws.cell(r, 5, _clean_num(rdata.err_first_bbox))
+        ws.cell(r, 6, _clean_num(rdata.err_second_bbox))
+        ws.cell(r, 7, _clean_num(rdata.err_first))
+        ws.cell(r, 8, _clean_num(rdata.err_second))
 
-        ws.cell(r, 7, f"=IF(D{r}>0,B{r}/D{r},0)")
-        ws.cell(r, 8, f"=IF(D{r}>0,C{r}/D{r},0)")
-        ws.cell(r, 9, f"=IF(B{r}>0,E{r}/B{r}*100,0)")
-        ws.cell(r, 10, f"=IF(C{r}>0,F{r}/C{r}*100,0)")
+        ws.cell(r, 9, f"=IF(D{r}>0,B{r}/D{r},0)")
+        ws.cell(r, 10, f"=IF(D{r}>0,C{r}/D{r},0)")
+        ws.cell(r, 11, f"=IF(C{r}>0,(E{r}+F{r})/C{r}*100,0)")
+        ws.cell(r, 12, f"=IF(B{r}>0,(G{r}+H{r})/B{r}*100,0)")
 
-        for c in range(1, 11):
+        for c in range(1, 13):
             cell = ws.cell(r, c)
-            left_b = MEDIUM_BLACK if c in (1, 7) else THIN_GRAY
-            right_b = MEDIUM_BLACK if c in (6, 10) else THIN_GRAY
+            left_b = MEDIUM_BLACK if c in (1, 9) else THIN_GRAY
+            right_b = MEDIUM_BLACK if c in (8, 12) else THIN_GRAY
             bot_b = MEDIUM_BLACK if is_last else THIN_GRAY
             cell.border = _make_border(left=left_b, right=right_b, top=THIN_GRAY, bottom=bot_b)
 
@@ -271,22 +276,22 @@ def _write_template2_by_annotator(wb: openpyxl.Workbook, report: ReportResult, h
                 cell.alignment = ALIGN_CENTER
                 if highlight_mismatch and rdata.has_mismatch:
                     cell.fill = WARN_FILL
-            elif c in (2, 3, 4, 5, 6):
+            elif c in (2, 3, 4, 5, 6, 7, 8):
                 cell.font = FONT_REGULAR
                 cell.alignment = ALIGN_RIGHT
                 cell.number_format = "0.##" if c == 4 else "0"
                 if highlight_mismatch and rdata.has_mismatch and c in (2, 3):
                     cell.fill = WARN_FILL
-            elif c in (7, 8):
+            elif c in (9, 10):
                 cell.font = FONT_BOLD
                 cell.alignment = ALIGN_RIGHT
                 cell.number_format = "0.00"
-            elif c in (9, 10):
+            elif c in (11, 12):
                 cell.font = FONT_RED
                 cell.alignment = ALIGN_RIGHT
                 cell.number_format = "0.00"
 
-    widths = [15, 11, 12, 11, 11, 11, 13, 13, 13, 13]
+    widths = [15, 11, 12, 11, 11, 11, 11, 11, 13, 13, 13, 13]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "B3"
