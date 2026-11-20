@@ -633,7 +633,7 @@ def parse_rework(xlsx_path: str, progress_cb=None) -> Tuple[List[ReworkRecord], 
 
             worker_raw = cell(r, col_worker)
             task_raw = cell(r, col_task)
-            if not worker_raw or not task_raw:
+            if not worker_raw:
                 continue
 
             w_key = normalize_annotator_key(worker_raw)
@@ -651,13 +651,17 @@ def parse_rework(xlsx_path: str, progress_cb=None) -> Tuple[List[ReworkRecord], 
                 if _parse_int(cell(nr, col_start_fr)) is None and _parse_int(cell(nr, col_end_fr)) is None:
                     bbox = num(cell(nr, col_img))
 
-            # Collect any notes attached to rows belonging to this block
+            # Collect any notes (and fallback TASK if missing on main row) attached to rows belonging to this block
             excel_row_num = i + 2
             block_notes = []
             j = i
             while j < n_rows:
                 if j > i and (_parse_int(cell(data_rows[j], col_start_fr)) is not None or _parse_int(cell(data_rows[j], col_end_fr)) is not None):
                     break
+                if j > i and not task_raw:
+                    sub_task = cell(data_rows[j], col_task)
+                    if sub_task and str(sub_task).strip():
+                        task_raw = sub_task
                 rnum = j + 2
                 prefix_matches = [f"{ref}: {txt}" for ref, txt in c_map.items() if re.fullmatch(rf"[A-Z]+{rnum}", ref)]
                 block_notes.extend(prefix_matches)
@@ -702,6 +706,66 @@ def parse_rework(xlsx_path: str, progress_cb=None) -> Tuple[List[ReworkRecord], 
     return records, warnings
 
 
+def _resolve_missing_rework_tasks(
+    rework_records: List[ReworkRecord],
+    worklog_blocks: List[WorklogBlockRecord],
+) -> None:
+    """Infer missing TASK on Rework records by matching Start/End Frame, Frame/BBOX count, and Job ID against Work_log blocks."""
+    missing = [r for r in rework_records if not r.task]
+    if not missing:
+        return
+
+    blocks_by_worker: Dict[str, List[WorklogBlockRecord]] = defaultdict(list)
+    for b in worklog_blocks:
+        if b.task:
+            blocks_by_worker[b.annotator_key].append(b)
+
+    task_by_job_id: Dict[str, Counter] = defaultdict(Counter)
+    for r in rework_records:
+        if r.task and r.job_id:
+            task_by_job_id[r.job_id][r.task] += 1
+    for b in worklog_blocks:
+        if b.task and b.job_id:
+            task_by_job_id[b.job_id][b.task] += 1
+
+    for r in missing:
+        ref_dt = r.date_work or r.date_inspect
+        cands = blocks_by_worker.get(r.worker_key, [])
+        best_task = ""
+        best_score = None
+
+        for b in cands:
+            same_range = (
+                r.start_frame is not None and r.end_frame is not None
+                and b.start_frame == r.start_frame and b.end_frame == r.end_frame
+            )
+            same_fr = abs(b.frames - r.frames) < 1e-6 and r.frames > 0
+            same_bb = abs(b.bbox - r.bbox) < 1e-6 and r.bbox > 0
+            same_job = bool(r.job_id and b.job_id and r.job_id == b.job_id)
+            day_gap = abs((ref_dt - b.date).days) if (ref_dt and b.date) else 999
+
+            tier = None
+            if same_range and same_fr and (same_bb or b.bbox == 0 or r.bbox == 0):
+                tier = 0
+            elif same_range:
+                tier = 1
+            elif same_job and same_fr:
+                tier = 2
+            elif same_fr and same_bb and day_gap <= 14:
+                tier = 3
+
+            if tier is not None:
+                score = (tier, 0 if same_job else 1, 0 if same_bb else 1, 0 if same_fr else 1, day_gap)
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_task = b.task
+
+        if not best_task and r.job_id and r.job_id in task_by_job_id:
+            best_task = task_by_job_id[r.job_id].most_common(1)[0][0]
+
+        r.task = best_task or "UNKNOWN"
+
+
 def load_dataset(worklog_path: str, rework_path: str, progress_cb=None) -> LoadedDataset:
     ds = LoadedDataset(worklog_path=worklog_path, rework_path=rework_path)
 
@@ -716,6 +780,8 @@ def load_dataset(worklog_path: str, rework_path: str, progress_cb=None) -> Loade
         rw_recs, rw_warn = parse_rework(rework_path, progress_cb=progress_cb)
         ds.rework_records = rw_recs
         ds.warnings.extend(rw_warn)
+
+    _resolve_missing_rework_tasks(ds.rework_records, ds.worklog_blocks)
 
     # Determine global max date and last active date per person to exclude inactive/old (~1 year) accounts
     all_dates: List[datetime.date] = []

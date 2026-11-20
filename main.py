@@ -14,8 +14,11 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDateEdit,
+    QDialog,
     QFileDialog,
+    QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -28,6 +31,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSplitter,
+    QStackedWidget,
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
@@ -38,6 +42,13 @@ from PyQt6.QtWidgets import (
 
 from data_engine import LoadedDataset, ReportResult, build_report, load_dataset
 from excel_exporter import export_report_to_excel
+from sharepoint_client import (
+    SharePointDownloadThread,
+    SharePointLoginDialog,
+    clear_sp_session,
+    extract_sp_site_url,
+    has_saved_sp_session,
+)
 from ui_theme import (
     DARK_THEME,
     LIGHT_THEME,
@@ -56,7 +67,18 @@ from ui_widgets import (
 
 
 APP_NAME = "Report Tools"
-APP_VERSION = "2.1"
+APP_VERSION = "2.2"
+
+DEFAULT_SP_WL_URL = (
+    "https://hanwhaworkplace.sharepoint.com/:x:/r/sites/HVV-AILabAnnotation/"
+    "Shared%20Documents/Work_log_2026_11.xlsx.xlsx"
+    "?d=w0f7b0e57e89249a1938c009da82fefa4&csf=1&web=1&e=eqHrz1"
+)
+DEFAULT_SP_RW_URL = (
+    "https://hanwhaworkplace.sharepoint.com/:x:/r/sites/HVV-AILabAnnotation/"
+    "Shared%20Documents/Inspection_And_Rework_2026.11.xlsx"
+    "?d=w3f3285489dac4f98addefbbd88d29790&csf=1&web=1&e=kUHBnR"
+)
 
 
 class CalendarDateEdit(QDateEdit):
@@ -244,6 +266,115 @@ class LoaderThread(QThread):
             self.failed.emit(str(exc))
 
 
+def _sp_cache_dir() -> str:
+    base = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "WorklogReportPro", "sp_cache")
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
+class SharePointDialog(QDialog):
+    """Dialog for embedded SharePoint browser login and 2 Excel link inputs (zero Azure IT approval)."""
+
+    def __init__(self, settings: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Kết nối SharePoint (Trình duyệt nhúng)")
+        self.setMinimumWidth(560)
+        self.settings = settings
+        self.sync_requested = False
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 16, 18, 16)
+        lay.setSpacing(12)
+
+        hdr = QLabel("☁ Lấy dữ liệu trực tiếp từ SharePoint")
+        hdr.setStyleSheet("font-size: 15px; font-weight: 700;")
+        lay.addWidget(hdr)
+
+        sub = QLabel(
+            "Đăng nhập tài khoản Microsoft công ty trực tiếp như trên trình duyệt (không cần IT phê duyệt) "
+            "và dán link SharePoint ('Copy link') của 2 file Excel."
+        )
+        sub.setWordWrap(True)
+        sub.setStyleSheet("font-size: 12px; color: #64748B;")
+        lay.addWidget(sub)
+
+        form = QFormLayout()
+        form.setSpacing(8)
+        self.ed_wl_url = QLineEdit(settings.get("sp_wl_url") or DEFAULT_SP_WL_URL)
+        self.ed_wl_url.setPlaceholderText("https://<tenant>.sharepoint.com/... (Copy link file Work_log)")
+        self.ed_rw_url = QLineEdit(settings.get("sp_rw_url") or DEFAULT_SP_RW_URL)
+        self.ed_rw_url.setPlaceholderText("https://<tenant>.sharepoint.com/... (Copy link file Inspection & Rework)")
+
+        form.addRow("Link Work_log:", self.ed_wl_url)
+        form.addRow("Link Review:", self.ed_rw_url)
+        lay.addLayout(form)
+
+        # Auth status row
+        auth_row = QHBoxLayout()
+        auth_row.setSpacing(8)
+        self.lbl_auth = QLabel("Chưa đăng nhập")
+        self.lbl_auth.setStyleSheet("font-weight: 600;")
+        auth_row.addWidget(self.lbl_auth, 1)
+
+        self.btn_login = QPushButton("Đăng nhập SharePoint")
+        self.btn_login.setObjectName("PrimaryBtn")
+        self.btn_login.clicked.connect(self._do_login)
+        auth_row.addWidget(self.btn_login)
+
+        self.btn_logout = QPushButton("Đăng xuất")
+        self.btn_logout.clicked.connect(self._do_logout)
+        auth_row.addWidget(self.btn_logout)
+        lay.addLayout(auth_row)
+
+        # Action buttons
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        self.btn_cancel = QPushButton("Đóng")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_sync = QPushButton("☁ Tải dữ liệu từ SharePoint")
+        self.btn_sync.setObjectName("SuccessBtn")
+        self.btn_sync.clicked.connect(self._do_sync)
+        btn_row.addWidget(self.btn_cancel)
+        btn_row.addWidget(self.btn_sync)
+        lay.addLayout(btn_row)
+
+        self._refresh_auth_status()
+
+    def _refresh_auth_status(self):
+        host = has_saved_sp_session(_sp_cache_dir())
+        if host:
+            self.lbl_auth.setText(f"✓ Đã lưu phiên đăng nhập ({host})")
+            self.lbl_auth.setStyleSheet("font-weight: 700; color: #059669;")
+            self.btn_logout.setEnabled(True)
+        else:
+            self.lbl_auth.setText("Chưa đăng nhập SharePoint")
+            self.lbl_auth.setStyleSheet("font-weight: 600; color: #64748B;")
+            self.btn_logout.setEnabled(False)
+
+    def _do_login(self):
+        start_url = extract_sp_site_url(self.ed_wl_url.text(), self.ed_rw_url.text())
+        login_dlg = SharePointLoginDialog(start_url, _sp_cache_dir(), self)
+        login_dlg.exec()
+        self._refresh_auth_status()
+
+    def _do_logout(self):
+        clear_sp_session(_sp_cache_dir())
+        self._refresh_auth_status()
+
+    def _do_sync(self):
+        if not (self.ed_wl_url.text().strip() or self.ed_rw_url.text().strip()):
+            QMessageBox.warning(self, "Thiếu link SharePoint", "Vui lòng dán ít nhất 1 link SharePoint (.xlsx).")
+            return
+        self.sync_requested = True
+        self.accept()
+
+    def values(self) -> dict:
+        return {
+            "sp_wl_url": self.ed_wl_url.text().strip(),
+            "sp_rw_url": self.ed_rw_url.text().strip(),
+        }
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -268,7 +399,8 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._apply_theme(self.theme)
         self._setup_shortcuts()
-        self._restore_files_and_load()
+        self._restore_files_only()
+        self._show_welcome_page()
 
     # ------------------------------------------------------------------
     # UI CONSTRUCTION
@@ -307,10 +439,20 @@ class MainWindow(QMainWindow):
 
         top_lay.addStretch(1)
 
+        self.btn_back_home = QPushButton(" ← Đổi nguồn")
+        self.btn_back_home.setToolTip("Quay lại màn hình đăng nhập SharePoint / chọn file đầu vào")
+        self.btn_back_home.clicked.connect(self._show_welcome_page)
+        top_lay.addWidget(self.btn_back_home)
+
         self.btn_onedrive = QPushButton(" ☁ Nguồn OneDrive")
         self.btn_onedrive.setToolTip(f"Nạp trực tiếp từ thư mục OneDrive Sync:\n{ONEDRIVE_PRIMARY_PATH}")
         self.btn_onedrive.clicked.connect(self.switch_to_onedrive_source)
         top_lay.addWidget(self.btn_onedrive)
+
+        self.btn_sharepoint = QPushButton(" SharePoint")
+        self.btn_sharepoint.setToolTip("Đăng nhập tài khoản Microsoft để tải trực tiếp 2 file Excel từ SharePoint")
+        self.btn_sharepoint.clicked.connect(self.open_sharepoint_dialog)
+        top_lay.addWidget(self.btn_sharepoint)
 
         self.btn_reload = QPushButton(" Nạp lại (F5)")
         self.btn_reload.setToolTip("Đọc lại 2 file Excel mới nhất từ ổ đĩa / OneDrive (F5)")
@@ -343,10 +485,17 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(False)
         root.addWidget(self.progress)
 
-        # ---- 2. MAIN WORKSPACE SPLITTER ----
+        # ---- 2. PAGE STACK: Page 0 = Welcome (Login / Load), Page 1 = Main Workspace ----
+        self.page_stack = QStackedWidget()
+        root.addWidget(self.page_stack, 1)
+
+        self.welcome_page = self._build_welcome_page()
+        self.page_stack.addWidget(self.welcome_page)
+
+        # ---- MAIN WORKSPACE SPLITTER (Page 1) ----
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(1)
-        root.addWidget(splitter, 1)
+        self.page_stack.addWidget(splitter)
 
         # ---- LEFT SIDEBAR ----
         sidebar = QFrame()
@@ -357,8 +506,31 @@ class MainWindow(QMainWindow):
         sb_lay.setContentsMargins(14, 12, 14, 12)
         sb_lay.setSpacing(12)
 
-        # Section A: Date Range
+        # Section A: Date Range — Month/Year first, then Weeks + Full Month, then manual Start -> End
         sb_lay.addWidget(self._section_label("KHOẢNG THỜI GIAN"))
+
+        wm_row = QHBoxLayout()
+        wm_row.setSpacing(6)
+        self.cb_week_month = QComboBox()
+        self.cb_week_month.setToolTip("Chọn Tháng/Năm để xem cả tháng hoặc từng tuần (Thứ 2 → Chủ nhật)")
+        self.cb_week_month.currentIndexChanged.connect(self._rebuild_week_buttons)
+        wm_row.addWidget(self.cb_week_month, 1)
+
+        self.btn_full_month = QPushButton("Cả tháng")
+        self.btn_full_month.setObjectName("PresetBtn")
+        self.btn_full_month.setCheckable(True)
+        self.btn_full_month.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_full_month.setToolTip("Chọn toàn bộ các ngày trong tháng đang chọn")
+        self.btn_full_month.clicked.connect(self._apply_selected_month)
+        wm_row.addWidget(self.btn_full_month)
+        sb_lay.addLayout(wm_row)
+
+        self.week_btns_layout = QGridLayout()
+        self.week_btns_layout.setSpacing(5)
+        self.week_btns_layout.setContentsMargins(0, 0, 0, 0)
+        sb_lay.addLayout(self.week_btns_layout)
+        self._week_buttons = []
+
         d_row = QHBoxLayout()
         d_row.setSpacing(6)
         self.dt_start = CalendarDateEdit()
@@ -374,19 +546,7 @@ class MainWindow(QMainWindow):
         d_row.addWidget(self.dt_end, 1)
         sb_lay.addLayout(d_row)
 
-        p_row = QHBoxLayout()
-        p_row.setSpacing(5)
-        for lbl, mode in [
-            ("Tuần trước", "last_week"),
-            ("Tuần này", "this_week"),
-            ("Tháng này", "this_month"),
-            ("Tất cả", "all"),
-        ]:
-            b = QPushButton(lbl)
-            b.setObjectName("PresetBtn")
-            b.clicked.connect(lambda _c=False, m=mode: self._apply_date_preset(m))
-            p_row.addWidget(b, 1)
-        sb_lay.addLayout(p_row)
+        self._populate_week_months()
 
         # Section B: Data Source & Mode (Segmented Controls)
         sb_lay.addWidget(self._section_label("NGUỒN DỮ LIỆU & ĐỐI CHIẾU"))
@@ -406,35 +566,6 @@ class MainWindow(QMainWindow):
         self.chk_highlight.setChecked(True)
         self.chk_highlight.toggled.connect(self.refresh_report)
         sb_lay.addWidget(self.chk_highlight)
-
-        # Section C: Task Filter Chips
-        t_hdr = QHBoxLayout()
-        t_hdr.addWidget(self._section_label("LỌC TASK"))
-        t_hdr.addStretch(1)
-        b_tall = QPushButton("Tất cả")
-        b_tall.setObjectName("GhostBtn")
-        b_tall.clicked.connect(lambda: self._set_all_task_chips(True))
-        b_tact = QPushButton("Có data")
-        b_tact.setObjectName("GhostBtn")
-        b_tact.clicked.connect(self._select_active_tasks)
-        b_tnone = QPushButton("Bỏ")
-        b_tnone.setObjectName("GhostBtn")
-        b_tnone.clicked.connect(lambda: self._set_all_task_chips(False))
-        t_hdr.addWidget(b_tall)
-        t_hdr.addWidget(b_tact)
-        t_hdr.addWidget(b_tnone)
-        sb_lay.addLayout(t_hdr)
-
-        self.task_scroll = QScrollArea()
-        self.task_scroll.setWidgetResizable(True)
-        self.task_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.task_scroll.viewport().setObjectName("TransparentHost")
-        self.task_scroll.setMaximumHeight(96)
-        self.task_chip_host = QWidget()
-        self.task_chip_host.setObjectName("TransparentHost")
-        self.task_flow = FlowLayout(self.task_chip_host, margin=2, h_spacing=5, v_spacing=5)
-        self.task_scroll.setWidget(self.task_chip_host)
-        sb_lay.addWidget(self.task_scroll)
 
         # Section D: Annotator Filter (1 person or many)
         a_hdr = QHBoxLayout()
@@ -493,20 +624,6 @@ class MainWindow(QMainWindow):
         files_row.addWidget(self.card_rw, 1)
         main_lay.addLayout(files_row)
 
-        # 5 Executive KPI Cards
-        kpi_row = QHBoxLayout()
-        kpi_row.setSpacing(10)
-        self.kpi_people = MetricCard("Nhân sự trong kỳ", "users", "#2563EB")
-        self.kpi_frames = MetricCard("Work Load (Frame)", "layers", "#0F172A")
-        self.kpi_bbox = MetricCard("Work BBOX", "box", "#7C3AED")
-        self.kpi_time = MetricCard("Work Time (MH)", "clock", "#0284C7")
-        self.kpi_quality = MetricCard("Lỗi & Đối chiếu 2 file", "shield", "#059669", clickable=True)
-        self.kpi_quality.setToolTip("Bấm để xem ngay danh sách ngày bị lệch giữa 2 file")
-        self.kpi_quality.clicked.connect(lambda: (self.tabs.setCurrentIndex(4), self.audit_subtabs.setCurrentIndex(0)))
-        for card in (self.kpi_people, self.kpi_frames, self.kpi_bbox, self.kpi_time, self.kpi_quality):
-            kpi_row.addWidget(card, 1)
-        main_lay.addLayout(kpi_row)
-
         # Single-person isolation banner (hidden unless active)
         self.isolate_banner = QFrame()
         self.isolate_banner.setObjectName("IsolateBanner")
@@ -527,13 +644,40 @@ class MainWindow(QMainWindow):
         # Tabs (Task, Annotator, Reviewer, Bảng Xếp Hạng, Đối chiếu & Notes)
         self.tabs = QTabWidget()
 
-        # Tab 1: Task (Workers only)
+        # Tab 1: Task (Workers only) — Main table on top, per-Task summary table below
+        tab_t1 = QWidget()
+        t1_lay = QVBoxLayout(tab_t1)
+        t1_lay.setContentsMargins(0, 0, 0, 0)
+        t1_lay.setSpacing(0)
+
+        t1_split = QSplitter(Qt.Orientation.Vertical)
+        t1_split.setChildrenCollapsible(False)
+
         self.tbl_t1 = QTableWidget()
         self._setup_table(self.tbl_t1)
-        self.del_t1 = ReportTableDelegate(divider_col=[9, 13, 14], parent=self.tbl_t1)
+        self.del_t1 = ReportTableDelegate(divider_col=9, parent=self.tbl_t1)
         self.tbl_t1.setItemDelegate(self.del_t1)
         self.tbl_t1.cellDoubleClicked.connect(self._on_t1_double_click)
-        self.tabs.addTab(self.tbl_t1, "Task")
+        t1_split.addWidget(self.tbl_t1)
+
+        t1_sum_wrap = QWidget()
+        t1_sum_lay = QVBoxLayout(t1_sum_wrap)
+        t1_sum_lay.setContentsMargins(8, 6, 8, 6)
+        t1_sum_lay.setSpacing(5)
+        lbl_t1_sum = QLabel("📊 Tổng hợp năng suất & tỉ lệ lỗi theo từng TASK")
+        lbl_t1_sum.setStyleSheet("font-weight: 700; font-size: 12.5px;")
+        t1_sum_lay.addWidget(lbl_t1_sum)
+
+        self.tbl_t1_summary = QTableWidget()
+        self._setup_table(self.tbl_t1_summary)
+        self.tbl_t1_summary.setMinimumHeight(110)
+        t1_sum_lay.addWidget(self.tbl_t1_summary)
+        t1_split.addWidget(t1_sum_wrap)
+
+        t1_split.setStretchFactor(0, 3)
+        t1_split.setStretchFactor(1, 1)
+        t1_lay.addWidget(t1_split)
+        self.tabs.addTab(tab_t1, "Task")
 
         # Tab 2: Annotator (Workers only)
         self.tbl_t2 = QTableWidget()
@@ -673,10 +817,16 @@ class MainWindow(QMainWindow):
         self.chk_exp_t1.setChecked(True)
         self.chk_exp_t2 = QCheckBox("Annotator")
         self.chk_exp_t2.setChecked(True)
-        self.chk_exp_audit = QCheckBox("Đối chiếu & Notes")
+        self.chk_exp_rev = QCheckBox("Reviewer")
+        self.chk_exp_rev.setChecked(True)
+        self.chk_exp_rank = QCheckBox("Bảng Xếp Hạng")
+        self.chk_exp_rank.setChecked(True)
+        self.chk_exp_audit = QCheckBox("Đối chiếu && Notes")
         self.chk_exp_audit.setChecked(True)
         foot.addWidget(self.chk_exp_t1)
         foot.addWidget(self.chk_exp_t2)
+        foot.addWidget(self.chk_exp_rev)
+        foot.addWidget(self.chk_exp_rank)
         foot.addWidget(self.chk_exp_audit)
         foot.addStretch(1)
 
@@ -694,6 +844,200 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Kéo thả 2 file Excel vào cửa sổ hoặc bấm chọn file để bắt đầu.")
 
         self.toast = ToastBanner(self)
+
+    def _build_welcome_page(self) -> QWidget:
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(36, 28, 36, 28)
+        outer.setSpacing(18)
+        outer.addStretch(1)
+
+        # Hero title
+        hero = QVBoxLayout()
+        hero.setSpacing(4)
+        lbl_h = QLabel(f"Chào mừng đến với {APP_NAME}")
+        lbl_h.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_h.setStyleSheet("font-size: 22px; font-weight: 700;")
+        lbl_sub = QLabel("Chọn đăng nhập SharePoint để lấy dữ liệu trực tuyến hoặc nạp 2 file Excel từ máy / OneDrive")
+        lbl_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_sub.setStyleSheet("font-size: 13px; color: #64748B;")
+        hero.addWidget(lbl_h)
+        hero.addWidget(lbl_sub)
+        outer.addLayout(hero)
+
+        # Two side-by-side cards
+        cards_wrap = QHBoxLayout()
+        cards_wrap.setSpacing(18)
+        cards_wrap.addStretch(1)
+
+        # Card 1: SharePoint Login & Sync
+        sp_card = QFrame()
+        sp_card.setObjectName("SectionCard")
+        sp_card.setMinimumWidth(440)
+        sp_card.setMaximumWidth(500)
+        sp_lay = QVBoxLayout(sp_card)
+        sp_lay.setContentsMargins(20, 18, 20, 18)
+        sp_lay.setSpacing(12)
+
+        sp_title = QLabel("☁ Đăng nhập SharePoint (Online)")
+        sp_title.setStyleSheet("font-size: 15px; font-weight: 700;")
+        sp_lay.addWidget(sp_title)
+
+        sp_desc = QLabel(
+            "Đăng nhập trực tiếp bằng tài khoản Microsoft công ty (không cần IT duyệt) "
+            "và dán link 'Copy link' của 2 file Excel trên SharePoint."
+        )
+        sp_desc.setWordWrap(True)
+        sp_desc.setStyleSheet("font-size: 12px; color: #64748B;")
+        sp_lay.addWidget(sp_desc)
+
+        sp_form = QFormLayout()
+        sp_form.setSpacing(8)
+        self.w_ed_wl_url = QLineEdit(self.settings.get("sp_wl_url") or DEFAULT_SP_WL_URL)
+        self.w_ed_wl_url.setPlaceholderText("Dán 'Copy link' file Work_log (.xlsx)")
+        self.w_ed_rw_url = QLineEdit(self.settings.get("sp_rw_url") or DEFAULT_SP_RW_URL)
+        self.w_ed_rw_url.setPlaceholderText("Dán 'Copy link' file Inspection & Rework (.xlsx)")
+        sp_form.addRow("Link Work_log:", self.w_ed_wl_url)
+        sp_form.addRow("Link Review:", self.w_ed_rw_url)
+        sp_lay.addLayout(sp_form)
+
+        sp_auth_row = QHBoxLayout()
+        sp_auth_row.setSpacing(8)
+        self.w_lbl_sp_auth = QLabel("Chưa đăng nhập")
+        self.w_lbl_sp_auth.setStyleSheet("font-size: 12px; font-weight: 600; color: #64748B;")
+        sp_auth_row.addWidget(self.w_lbl_sp_auth, 1)
+
+        self.w_btn_sp_login = QPushButton("Đăng nhập SharePoint")
+        self.w_btn_sp_login.setObjectName("PrimaryBtn")
+        self.w_btn_sp_login.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.w_btn_sp_login.clicked.connect(self._welcome_sp_login)
+        sp_auth_row.addWidget(self.w_btn_sp_login)
+
+        self.w_btn_sp_logout = QPushButton("Đăng xuất")
+        self.w_btn_sp_logout.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.w_btn_sp_logout.clicked.connect(self._welcome_sp_logout)
+        sp_auth_row.addWidget(self.w_btn_sp_logout)
+        sp_lay.addLayout(sp_auth_row)
+
+        sp_lay.addStretch(1)
+        self.w_btn_sp_sync = QPushButton("☁ Tải từ SharePoint && Vào báo cáo")
+        self.w_btn_sp_sync.setObjectName("SuccessBtn")
+        self.w_btn_sp_sync.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.w_btn_sp_sync.clicked.connect(self._welcome_sp_sync)
+        sp_lay.addWidget(self.w_btn_sp_sync)
+        cards_wrap.addWidget(sp_card)
+
+        # Card 2: Local / OneDrive Excel Files
+        loc_card = QFrame()
+        loc_card.setObjectName("SectionCard")
+        loc_card.setMinimumWidth(440)
+        loc_card.setMaximumWidth(500)
+        loc_lay = QVBoxLayout(loc_card)
+        loc_lay.setContentsMargins(20, 18, 20, 18)
+        loc_lay.setSpacing(12)
+
+        loc_title = QLabel("📂 Nạp file Excel từ máy / OneDrive")
+        loc_title.setStyleSheet("font-size: 15px; font-weight: 700;")
+        loc_lay.addWidget(loc_title)
+
+        self.w_card_wl = FileDropCard("FILE WORK LOG (CẢ EXCEL NOTES)", "Kéo thả hoặc chọn Work_log_*.xlsx", "#2563EB")
+        self.w_card_wl.browse_clicked.connect(lambda: self._browse_file("wl", auto_load=False))
+        self.w_card_wl.file_dropped.connect(lambda p: self._set_file_only("wl", p))
+        loc_lay.addWidget(self.w_card_wl)
+
+        self.w_card_rw = FileDropCard("FILE INSPECTION & REVIEW", "Kéo thả hoặc chọn Inspection_And_Rework_*.xlsx", "#059669")
+        self.w_card_rw.browse_clicked.connect(lambda: self._browse_file("rw", auto_load=False))
+        self.w_card_rw.file_dropped.connect(lambda p: self._set_file_only("rw", p))
+        loc_lay.addWidget(self.w_card_rw)
+
+        loc_lay.addStretch(1)
+        loc_btns = QHBoxLayout()
+        loc_btns.setSpacing(8)
+        self.w_btn_od = QPushButton("☁ Tìm OneDrive Sync")
+        self.w_btn_od.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.w_btn_od.clicked.connect(self._welcome_find_onedrive)
+        loc_btns.addWidget(self.w_btn_od)
+
+        self.w_btn_load = QPushButton("▶ Nạp dữ liệu && Vào báo cáo")
+        self.w_btn_load.setObjectName("PrimaryBtn")
+        self.w_btn_load.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.w_btn_load.clicked.connect(self.start_load_data)
+        loc_btns.addWidget(self.w_btn_load, 1)
+        loc_lay.addLayout(loc_btns)
+        cards_wrap.addWidget(loc_card)
+
+        cards_wrap.addStretch(1)
+        outer.addLayout(cards_wrap)
+
+        self.w_lbl_status = QLabel("")
+        self.w_lbl_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.w_lbl_status.setStyleSheet("font-size: 12.5px; font-weight: 600; color: #2563EB;")
+        outer.addWidget(self.w_lbl_status)
+        outer.addStretch(2)
+        return page
+
+    def _show_welcome_page(self):
+        self.page_stack.setCurrentIndex(0)
+        for b in (self.btn_back_home, self.btn_onedrive, self.btn_sharepoint, self.btn_reload, self.btn_copy, self.btn_export):
+            b.setVisible(False)
+        self._refresh_welcome_sp_auth()
+
+    def _show_main_workspace(self):
+        self.page_stack.setCurrentIndex(1)
+        for b in (self.btn_back_home, self.btn_onedrive, self.btn_sharepoint, self.btn_reload, self.btn_copy, self.btn_export):
+            b.setVisible(True)
+
+    def _refresh_welcome_sp_auth(self):
+        host = has_saved_sp_session(_sp_cache_dir())
+        if host:
+            self.w_lbl_sp_auth.setText(f"✓ Đã đăng nhập ({host})")
+            self.w_lbl_sp_auth.setStyleSheet("font-size: 12px; font-weight: 700; color: #059669;")
+            self.w_btn_sp_logout.setEnabled(True)
+        else:
+            self.w_lbl_sp_auth.setText("Chưa đăng nhập SharePoint")
+            self.w_lbl_sp_auth.setStyleSheet("font-size: 12px; font-weight: 600; color: #64748B;")
+            self.w_btn_sp_logout.setEnabled(False)
+
+    def _save_welcome_sp_fields(self):
+        self.settings["sp_wl_url"] = self.w_ed_wl_url.text().strip()
+        self.settings["sp_rw_url"] = self.w_ed_rw_url.text().strip()
+        self._save_current_settings()
+
+    def _welcome_sp_login(self):
+        self._save_welcome_sp_fields()
+        start_url = extract_sp_site_url(self.w_ed_wl_url.text(), self.w_ed_rw_url.text())
+        dlg = SharePointLoginDialog(start_url, _sp_cache_dir(), self)
+        dlg.exec()
+        self._refresh_welcome_sp_auth()
+
+    def _welcome_sp_logout(self):
+        clear_sp_session(_sp_cache_dir())
+        self._refresh_welcome_sp_auth()
+
+    def _welcome_sp_sync(self):
+        self._save_welcome_sp_fields()
+        wl_u = self.w_ed_wl_url.text().strip()
+        rw_u = self.w_ed_rw_url.text().strip()
+        if not (wl_u or rw_u):
+            QMessageBox.warning(self, "Thiếu link SharePoint", "Vui lòng dán ít nhất 1 link SharePoint (.xlsx).")
+            return
+        self._start_sharepoint_sync(wl_u, rw_u)
+
+    def _welcome_find_onedrive(self):
+        od_dirs = _get_onedrive_dirs()
+        od_wl, od_rw = _find_default_files(od_dirs)
+        if not od_wl and not od_rw:
+            QMessageBox.warning(self, "Không tìm thấy file OneDrive", f"Không tìm thấy file Excel trong:\n{ONEDRIVE_PRIMARY_PATH}")
+            return
+        is_dark = self.theme["name"] == "dark"
+        if od_wl:
+            self.card_wl.set_path(od_wl, is_dark)
+            self.w_card_wl.set_path(od_wl, is_dark)
+        if od_rw:
+            self.card_rw.set_path(od_rw, is_dark)
+            self.w_card_rw.set_path(od_rw, is_dark)
+        self._save_current_settings()
+        self.toast.show_toast("✓ Đã tìm thấy file trong OneDrive Sync. Bấm 'Nạp dữ liệu' để mở.", "success")
 
     def _section_label(self, text: str) -> QLabel:
         lbl = QLabel(text)
@@ -761,6 +1105,7 @@ class MainWindow(QMainWindow):
         self.del_rev.set_theme(theme)
 
         ic_color = theme["text_secondary"]
+        self.btn_sharepoint.setIcon(svg_icon("cloud", theme["accent"], 15))
         self.btn_reload.setIcon(svg_icon("refresh", ic_color, 15))
         self.btn_copy.setIcon(svg_icon("copy", ic_color, 15))
         self.btn_export.setIcon(svg_icon("download", "#FFFFFF", 15))
@@ -773,9 +1118,11 @@ class MainWindow(QMainWindow):
 
         self.card_wl.set_path(self.card_wl.path(), is_dark)
         self.card_rw.set_path(self.card_rw.path(), is_dark)
+        if hasattr(self, "w_card_wl"):
+            self.w_card_wl.set_path(self.card_wl.path(), is_dark)
+            self.w_card_rw.set_path(self.card_rw.path(), is_dark)
 
         if self.current_report:
-            self._render_kpis(self.current_report)
             self._render_template1(self.current_report)
             self._render_template2(self.current_report)
             self._render_reviewer_tab(self.current_report)
@@ -799,20 +1146,17 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # FILE DISCOVERY & LOADING
     # ------------------------------------------------------------------
-    def _restore_files_and_load(self):
+    def _restore_files_only(self):
         base = _app_base_dir()
         parent = os.path.dirname(base)
         od_dirs = _get_onedrive_dirs()
 
-        # 1. Highest priority: OneDrive / SharePoint synced folder
         od_wl, od_rw = _find_default_files(od_dirs)
-        # 2. Fallback: local folder next to .exe
         local_wl, local_rw = _find_default_files([base, parent, os.getcwd()])
 
         saved_wl = self.settings.get("worklog_path", "")
         saved_rw = self.settings.get("rework_path", "")
 
-        # Prefer OneDrive whenever available; otherwise use saved or local
         if od_wl:
             wl = saved_wl if (saved_wl and os.path.isfile(saved_wl) and "onedrive" in saved_wl.lower()) else od_wl
         else:
@@ -826,10 +1170,78 @@ class MainWindow(QMainWindow):
         is_dark = self.theme["name"] == "dark"
         self.card_wl.set_path(wl, is_dark)
         self.card_rw.set_path(rw, is_dark)
+        self.w_card_wl.set_path(wl, is_dark)
+        self.w_card_rw.set_path(rw, is_dark)
         self._save_current_settings()
 
-        if wl or rw:
-            self.start_load_data()
+    def open_sharepoint_dialog(self):
+        dlg = SharePointDialog(self.settings, self)
+        res = dlg.exec()
+        vals = dlg.values()
+        self.settings.update(vals)
+        self.w_ed_wl_url.setText(vals["sp_wl_url"])
+        self.w_ed_rw_url.setText(vals["sp_rw_url"])
+        self._save_current_settings()
+        self._refresh_welcome_sp_auth()
+        if res == QDialog.DialogCode.Accepted and dlg.sync_requested:
+            self._start_sharepoint_sync(vals["sp_wl_url"], vals["sp_rw_url"])
+
+    def _start_sharepoint_sync(self, wl_url: str, rw_url: str, _retried: bool = False):
+        self._pending_sp_urls = (wl_url, rw_url, _retried)
+        self.btn_sharepoint.setEnabled(False)
+        self.w_btn_sp_sync.setEnabled(False)
+        self.w_btn_load.setEnabled(False)
+        self.progress.setVisible(True)
+        self.progress.setValue(8)
+        self.w_lbl_status.setText("Đang kết nối SharePoint...")
+        self.status_bar.showMessage("Đang kết nối SharePoint...")
+
+        self._sp_dl_thread = SharePointDownloadThread(wl_url, rw_url, _sp_cache_dir())
+        self._sp_dl_thread.progress.connect(self._on_load_progress)
+        self._sp_dl_thread.finished_ok.connect(lambda wl_p, rw_p: self._on_sp_sync_done(wl_p, rw_p, "SharePoint"))
+        self._sp_dl_thread.need_login.connect(self._on_sp_need_login)
+        self._sp_dl_thread.failed.connect(self._on_sp_sync_fail)
+        self._sp_dl_thread.start()
+
+    def _on_sp_need_login(self):
+        self.btn_sharepoint.setEnabled(True)
+        self.w_btn_sp_sync.setEnabled(True)
+        self.w_btn_load.setEnabled(True)
+        self.progress.setVisible(False)
+        self.w_lbl_status.setText("")
+        wl_url, rw_url, retried = getattr(self, "_pending_sp_urls", ("", "", False))
+        if retried:
+            QMessageBox.warning(self, "Chưa đăng nhập SharePoint", "Không xác thực được phiên SharePoint. Vui lòng thử đăng nhập lại.")
+            return
+        dlg = SharePointLoginDialog(extract_sp_site_url(wl_url, rw_url), _sp_cache_dir(), self)
+        res = dlg.exec()
+        self._refresh_welcome_sp_auth()
+        if res == QDialog.DialogCode.Accepted:
+            self._start_sharepoint_sync(wl_url, rw_url, _retried=True)
+
+    def _on_sp_sync_done(self, wl_path: str, rw_path: str, user: str):
+        self.btn_sharepoint.setEnabled(True)
+        self.w_btn_sp_sync.setEnabled(True)
+        self.w_btn_load.setEnabled(True)
+        is_dark = (self.theme["name"] == "dark")
+        if wl_path:
+            self.card_wl.set_path(wl_path, is_dark)
+            self.w_card_wl.set_path(wl_path, is_dark)
+        if rw_path:
+            self.card_rw.set_path(rw_path, is_dark)
+            self.w_card_rw.set_path(rw_path, is_dark)
+        self._save_current_settings()
+        self.toast.show_toast(f"✓ Đã tải từ {user}, đang phân tích dữ liệu...", "success", 3500)
+        self.start_load_data()
+
+    def _on_sp_sync_fail(self, err: str):
+        self.btn_sharepoint.setEnabled(True)
+        self.w_btn_sp_sync.setEnabled(True)
+        self.w_btn_load.setEnabled(True)
+        self.progress.setVisible(False)
+        self.w_lbl_status.setText("")
+        self.status_bar.showMessage("Lỗi tải dữ liệu từ SharePoint!")
+        QMessageBox.critical(self, "Lỗi SharePoint", err)
 
     def switch_to_onedrive_source(self):
         od_dirs = _get_onedrive_dirs()
@@ -855,7 +1267,7 @@ class MainWindow(QMainWindow):
         self.toast.show_toast("☁ Đã chuyển sang nguồn OneDrive Sync!", "info")
         self.start_load_data()
 
-    def _browse_file(self, kind: str, start_override: str = ""):
+    def _browse_file(self, kind: str, start_override: str = "", auto_load: bool = True):
         cur = self.card_wl.path() if kind == "wl" else self.card_rw.path()
         if start_override and os.path.isdir(start_override):
             start_dir = start_override
@@ -867,15 +1279,23 @@ class MainWindow(QMainWindow):
         title = "Chọn file Work Log (.xlsx)" if kind == "wl" else "Chọn file Inspection & Review (.xlsx)"
         path, _ = QFileDialog.getOpenFileName(self, title, start_dir, "Excel Workbook (*.xlsx)")
         if path:
-            self._set_file_and_reload(kind, path)
+            if auto_load:
+                self._set_file_and_reload(kind, path)
+            else:
+                self._set_file_only(kind, path)
 
-    def _set_file_and_reload(self, kind: str, path: str):
+    def _set_file_only(self, kind: str, path: str):
         is_dark = self.theme["name"] == "dark"
         if kind == "wl":
             self.card_wl.set_path(path, is_dark)
+            self.w_card_wl.set_path(path, is_dark)
         else:
             self.card_rw.set_path(path, is_dark)
+            self.w_card_rw.set_path(path, is_dark)
         self._save_current_settings()
+
+    def _set_file_and_reload(self, kind: str, path: str):
+        self._set_file_only(kind, path)
         self.start_load_data()
 
     def start_load_data(self):
@@ -896,8 +1316,11 @@ class MainWindow(QMainWindow):
 
         self.btn_reload.setEnabled(False)
         self.btn_export.setEnabled(False)
+        self.w_btn_load.setEnabled(False)
+        self.w_btn_sp_sync.setEnabled(False)
         self.progress.setVisible(True)
         self.progress.setValue(0)
+        self.w_lbl_status.setText("Đang đọc dữ liệu & Excel Notes...")
         self.status_bar.showMessage("Đang đọc dữ liệu & Excel Notes...")
 
         self.loader_thread = LoaderThread(wl, rw)
@@ -908,32 +1331,23 @@ class MainWindow(QMainWindow):
 
     def _on_load_progress(self, pct: int, msg: str):
         self.progress.setValue(pct)
+        self.w_lbl_status.setText(msg)
         self.status_bar.showMessage(msg)
 
     def _on_load_done(self, ds: LoadedDataset):
         self.dataset = ds
         self.btn_reload.setEnabled(True)
         self.btn_export.setEnabled(True)
+        self.w_btn_load.setEnabled(True)
+        self.w_btn_sp_sync.setEnabled(True)
         self.progress.setVisible(False)
+        self.w_lbl_status.setText("")
+        self._show_main_workspace()
         self._isolated_annotator = None
         self.isolate_banner.setVisible(False)
 
-        # Build Task chips
-        self._updating_filters = True
-        self._clear_task_chips()
-        priority = {"OD": 0, "SSEG": 1, "PFE": 2}
-        ordered_tasks = sorted(ds.tasks, key=lambda t: (priority.get(t, 99), t))
-        for t in ordered_tasks:
-            btn = QPushButton(t)
-            btn.setObjectName("ChipBtn")
-            btn.setCheckable(True)
-            btn.setChecked(True)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.toggled.connect(self._on_task_chip_toggled)
-            self.task_flow.addWidget(btn)
-            self._task_chips[t] = btn
-
         # Build Annotator list
+        self._updating_filters = True
         self.list_anns.clear()
         for key, disp in ds.annotators.items():
             it = QListWidgetItem(disp)
@@ -959,6 +1373,7 @@ class MainWindow(QMainWindow):
             self.dt_end.setDate(QDate(e_d.year, e_d.month, e_d.day))
             self.dt_start.blockSignals(False)
             self.dt_end.blockSignals(False)
+            self._populate_week_months(select_ym=(s_d.year, s_d.month))
 
         msg = (
             f"✓ Đã nạp {len(ds.annotators)} annotators · {len(ds.worklog_notes):,} Notes · "
@@ -971,61 +1386,147 @@ class MainWindow(QMainWindow):
     def _on_load_fail(self, err: str):
         self.btn_reload.setEnabled(True)
         self.btn_export.setEnabled(True)
+        self.w_btn_load.setEnabled(True)
+        self.w_btn_sp_sync.setEnabled(True)
         self.progress.setVisible(False)
+        self.w_lbl_status.setText("")
         self.status_bar.showMessage("Lỗi khi nạp file Excel!")
         QMessageBox.critical(self, "Lỗi đọc file Excel", f"Không thể đọc file:\n{err}")
 
     # ------------------------------------------------------------------
     # FILTER INTERACTIONS
     # ------------------------------------------------------------------
-    def _clear_task_chips(self):
-        while self.task_flow.count():
-            item = self.task_flow.takeAt(0)
-            w = item.widget()
-            if w:
-                w.deleteLater()
-        self._task_chips.clear()
-
     def _on_option_changed(self, _val):
         self._save_current_settings()
         self.refresh_report()
 
     def _on_date_changed(self):
+        self._sync_period_button_states()
         self.refresh_report()
 
-    def _apply_date_preset(self, mode: str):
-        ref = self.dataset.max_date if (self.dataset and self.dataset.max_date) else datetime.date.today()
-        mon = ref - datetime.timedelta(days=ref.weekday())
-        if mode == "this_week":
-            s, e = mon, mon + datetime.timedelta(days=6)
-        elif mode == "last_week":
-            s = mon - datetime.timedelta(days=7)
-            e = s + datetime.timedelta(days=6)
-        elif mode == "this_month":
-            s = ref.replace(day=1)
-            next_m = (s.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
-            e = next_m - datetime.timedelta(days=1)
-        else:
-            s = self.dataset.min_date if (self.dataset and self.dataset.min_date) else ref
-            e = ref
+    @staticmethod
+    def _weeks_in_month(year: int, month: int):
+        """Return list of full (Mon, Sun) weeks whose Monday falls in (year, month).
+        If the last week extends past the end of the month, those remaining days of the week are included."""
+        first_day = datetime.date(year, month, 1)
+        next_m = (first_day.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
+        last_day = next_m - datetime.timedelta(days=1)
+        # First Monday in the month
+        days_to_mon = (7 - first_day.weekday()) % 7
+        cur = first_day + datetime.timedelta(days=days_to_mon)
+        weeks = []
+        while cur <= last_day:
+            weeks.append((cur, cur + datetime.timedelta(days=6)))
+            cur += datetime.timedelta(days=7)
+        return weeks
 
+    @staticmethod
+    def _month_bounds(year: int, month: int):
+        first_day = datetime.date(year, month, 1)
+        next_m = (first_day.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
+        return first_day, next_m - datetime.timedelta(days=1)
+
+    def _populate_week_months(self, select_ym=None):
+        """Populate month dropdown for week-of-month selection."""
+        months = []
+        if self.dataset and self.dataset.min_date and self.dataset.max_date:
+            y, m = self.dataset.max_date.year, self.dataset.max_date.month
+            min_ym = (self.dataset.min_date.year, self.dataset.min_date.month)
+            while (y, m) >= min_ym:
+                months.append((y, m))
+                m -= 1
+                if m == 0:
+                    m = 12
+                    y -= 1
+        else:
+            qd = self.dt_start.date()
+            ref_y, ref_m = qd.year(), qd.month()
+            for offset in range(12):
+                m = ref_m - offset
+                y = ref_y
+                while m <= 0:
+                    m += 12
+                    y -= 1
+                months.append((y, m))
+
+        self.cb_week_month.blockSignals(True)
+        self.cb_week_month.clear()
+        for y, m in months:
+            self.cb_week_month.addItem(f"Tháng {m:02d}/{y}", (y, m))
+        target_idx = 0
+        if select_ym:
+            for i in range(self.cb_week_month.count()):
+                if self.cb_week_month.itemData(i) == select_ym:
+                    target_idx = i
+                    break
+        if self.cb_week_month.count() > 0:
+            self.cb_week_month.setCurrentIndex(target_idx)
+        self.cb_week_month.blockSignals(False)
+        self._rebuild_week_buttons()
+
+    def _rebuild_week_buttons(self):
+        while self.week_btns_layout.count():
+            item = self.week_btns_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        self._week_buttons = []
+
+        ym = self.cb_week_month.currentData()
+        if not ym:
+            return
+        year, month = ym
+        ms, me = self._month_bounds(year, month)
+        self.btn_full_month.setToolTip(
+            f"Cả tháng {month:02d}/{year}: {ms.strftime('%d/%m/%Y')} → {me.strftime('%d/%m/%Y')}"
+        )
+        weeks = self._weeks_in_month(year, month)
+        cols = 3
+        for idx, (s_d, e_d) in enumerate(weeks, start=1):
+            btn = QPushButton(f"Tuần {idx}")
+            btn.setObjectName("PresetBtn")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(
+                f"Tuần {idx} tháng {month:02d}/{year}: "
+                f"{s_d.strftime('%d/%m/%Y')} → {e_d.strftime('%d/%m/%Y')}"
+            )
+            btn.clicked.connect(lambda _c=False, s=s_d, e=e_d: self._apply_date_range(s, e))
+            r_i, c_i = divmod(idx - 1, cols)
+            self.week_btns_layout.addWidget(btn, r_i, c_i)
+            self._week_buttons.append((btn, s_d, e_d))
+        self._sync_period_button_states()
+
+    def _apply_selected_month(self):
+        ym = self.cb_week_month.currentData()
+        if not ym:
+            return
+        s_d, e_d = self._month_bounds(ym[0], ym[1])
+        self._apply_date_range(s_d, e_d)
+
+    def _sync_period_button_states(self):
+        cur_s, cur_e = self._get_period_bounds()
+        ym = self.cb_week_month.currentData()
+        is_full_month = False
+        if ym:
+            ms, me = self._month_bounds(ym[0], ym[1])
+            is_full_month = (cur_s == ms and cur_e == me)
+        self.btn_full_month.blockSignals(True)
+        self.btn_full_month.setChecked(is_full_month)
+        self.btn_full_month.blockSignals(False)
+        for btn, s_d, e_d in self._week_buttons:
+            btn.blockSignals(True)
+            btn.setChecked(cur_s == s_d and cur_e == e_d)
+            btn.blockSignals(False)
+
+    def _apply_date_range(self, s: datetime.date, e: datetime.date):
         self.dt_start.blockSignals(True)
         self.dt_end.blockSignals(True)
         self.dt_start.setDate(QDate(s.year, s.month, s.day))
         self.dt_end.setDate(QDate(e.year, e.month, e.day))
         self.dt_start.blockSignals(False)
         self.dt_end.blockSignals(False)
-        self.refresh_report()
-
-    def _on_task_chip_toggled(self, _checked):
-        if not self._updating_filters:
-            self.refresh_report()
-
-    def _set_all_task_chips(self, checked: bool):
-        self._updating_filters = True
-        for btn in self._task_chips.values():
-            btn.setChecked(checked)
-        self._updating_filters = False
+        self._sync_period_button_states()
         self.refresh_report()
 
     def _get_period_bounds(self):
@@ -1033,21 +1534,6 @@ class MainWindow(QMainWindow):
         s_d = datetime.date(qd_s.year(), qd_s.month(), qd_s.day())
         e_d = datetime.date(qd_e.year(), qd_e.month(), qd_e.day())
         return (e_d, s_d) if s_d > e_d else (s_d, e_d)
-
-    def _select_active_tasks(self):
-        if not self.dataset:
-            return
-        s_d, e_d = self._get_period_bounds()
-        rep_all = build_report(
-            self.dataset, s_d, e_d, None, None,
-            source_mode=self.seg_source.current_value(),
-        )
-        active = {r.task for r in rep_all.all_rows}
-        self._updating_filters = True
-        for t, btn in self._task_chips.items():
-            btn.setChecked(t in active)
-        self._updating_filters = False
-        self.refresh_report()
 
     def _set_all_anns(self, checked: bool):
         self._isolated_annotator = None
@@ -1121,9 +1607,6 @@ class MainWindow(QMainWindow):
                 res.add(it.data(Qt.ItemDataRole.UserRole))
         return res
 
-    def _get_checked_tasks(self) -> Set[str]:
-        return {t for t, btn in self._task_chips.items() if btn.isChecked()}
-
     # ------------------------------------------------------------------
     # REPORT COMPUTATION & RENDERING
     # ------------------------------------------------------------------
@@ -1153,12 +1636,11 @@ class MainWindow(QMainWindow):
             start_date=s_d,
             end_date=e_d,
             selected_annotators=self._get_checked_annotators(),
-            selected_tasks=self._get_checked_tasks(),
+            selected_tasks=None,
             source_mode=src,
         )
         self.lbl_period_badge.setText(f"Kỳ báo cáo: {s_d.strftime('%Y.%m.%d')} ~ {e_d.strftime('%Y.%m.%d')}")
 
-        self._render_kpis(self.current_report)
         self._render_template1(self.current_report)
         self._render_template2(self.current_report)
         self._render_reviewer_tab(self.current_report)
@@ -1167,44 +1649,6 @@ class MainWindow(QMainWindow):
         self._populate_note_filter(self.current_report)
         self._render_daily_diffs_table()
         self._render_notes_table()
-
-    def _render_kpis(self, rep: ReportResult):
-        t = self.theme
-        rows = rep.all_rows
-        uniq_anns = len({r.annotator_key for r in rows})
-        uniq_tasks = len({r.task for r in rows})
-        tot_fr = sum(r.work_load for r in rows)
-        tot_bb = sum(r.work_bbox for r in rows)
-        tot_tm = sum(r.work_time for r in rows)
-        tot_err = sum(r.err_first + r.err_second for r in rows)
-        avg_fph = (tot_fr / tot_tm) if tot_tm > 0 else 0.0
-        avg_bph = (tot_bb / tot_tm) if tot_tm > 0 else 0.0
-        err_rate = (tot_err / tot_fr * 100.0) if tot_fr > 0 else 0.0
-        real_diff_days = sum(1 for d in rep.daily_diffs if d.kind == "mismatch")
-        pend_diff_days = sum(1 for d in rep.daily_diffs if d.kind == "pending_rework")
-        days = (rep.end_date - rep.start_date).days + 1
-
-        self.kpi_people.set_data(f"{uniq_anns} người", f"{len(rows)} dòng · {uniq_tasks} Task", t["accent"])
-        self.kpi_frames.set_data(_fmt_int(tot_fr), f"TB {avg_fph:.2f} frame/h", t["text_primary"])
-        self.kpi_bbox.set_data(_fmt_int(tot_bb), f"TB {avg_bph:.2f} bbox/h", "#8B5CF6" if t["name"] == "dark" else "#7C3AED")
-        self.kpi_time.set_data(f"{_fmt_time(tot_tm)} h", f"Trong {days} ngày", "#38BDF8" if t["name"] == "dark" else "#0284C7")
-        if real_diff_days > 0:
-            extra = f" · {pend_diff_days} chưa có Review" if pend_diff_days else ""
-            self.kpi_quality.set_data(
-                f"{err_rate:.2f}%",
-                f"⚠ {real_diff_days} ngày lệch{extra} (bấm xem)",
-                t["warn"],
-                "alert",
-            )
-        elif pend_diff_days > 0:
-            self.kpi_quality.set_data(
-                f"{err_rate:.2f}%",
-                f"⏳ {pend_diff_days} ngày chưa có data Review",
-                t["accent"],
-                "clock",
-            )
-        else:
-            self.kpi_quality.set_data(f"{err_rate:.2f}%", f"✓ Khớp 100% ({len(rep.filtered_notes)} notes)", t["success"], "shield")
 
     def _make_item(
         self,
@@ -1298,11 +1742,6 @@ class MainWindow(QMainWindow):
             "BBOX\n/ Hour",
             "Err Rate\nBBOX (%)",
             "Err Rate\nFrame (%)",
-            "TASK",
-            "Avg\nFrame/h",
-            "Avg\nBBOX/h",
-            "Err Rate\nBBOX (%)",
-            "Err Rate\nFrame (%)",
         ]
         total_rows = sum(len(g.rows) for g in groups)
         tbl.setColumnCount(len(headers))
@@ -1310,7 +1749,6 @@ class MainWindow(QMainWindow):
         tbl.setRowCount(total_rows)
 
         hl = self.chk_highlight.isChecked()
-        task_avg_bg = "#F1F5F9" if t["name"] == "light" else "#162032"
         group_bottoms = set()
         cur = 0
         for grp in groups:
@@ -1347,22 +1785,8 @@ class MainWindow(QMainWindow):
                 tbl.setItem(row_i, 11, self._make_item(_fmt_f2(r.total_err_bbox_rate), bold=True, fg=t["danger"], tooltip=tip))
                 tbl.setItem(row_i, 12, self._make_item(_fmt_f2(r.total_err_rate), bold=True, fg=t["danger"], tooltip=tip))
 
-            avg_tip = (
-                f"Chỉ số trung bình & tỉ lệ lỗi của toàn bộ nhóm TASK {disp_task} ({n} người):\n"
-                f"  • Tổng Frame: {_fmt_int(grp.total_work_load)} | Tổng BBOX: {_fmt_int(grp.total_work_bbox)} | Tổng Time: {_fmt_time(grp.total_work_time)}h\n"
-                f"  • Tổng lỗi BBOX: {_fmt_int(grp.total_err_bbox)} ({_fmt_f2(grp.total_task_err_bbox_rate)}%) | Tổng lỗi Frame: {_fmt_int(grp.total_err_frame)} ({_fmt_f2(grp.total_task_err_rate)}%)"
-            )
-            avg_align = Qt.AlignmentFlag.AlignCenter
-            tbl.setItem(start_r, 13, self._make_item(disp_task, avg_align, True, t["task_badge_fg"], t["task_badge_bg"], tooltip=avg_tip))
-            tbl.setItem(start_r, 14, self._make_item(_fmt_f2(grp.avg_frame_per_hour), avg_align, True, t["danger"], bg=task_avg_bg, tooltip=avg_tip))
-            tbl.setItem(start_r, 15, self._make_item(_fmt_f2(grp.avg_bbox_per_hour), avg_align, True, t["danger"], bg=task_avg_bg, tooltip=avg_tip))
-            tbl.setItem(start_r, 16, self._make_item(_fmt_f2(grp.total_task_err_bbox_rate), avg_align, True, t["danger"], bg=task_avg_bg, tooltip=avg_tip))
-            tbl.setItem(start_r, 17, self._make_item(_fmt_f2(grp.total_task_err_rate), avg_align, True, t["danger"], bg=task_avg_bg, tooltip=avg_tip))
-
             if n > 1:
                 tbl.setSpan(start_r, 0, n, 1)
-                for c in (13, 14, 15, 16, 17):
-                    tbl.setSpan(start_r, c, n, 1)
             cur += n
 
         delegate.set_group_bottom_rows(group_bottoms)
@@ -1370,11 +1794,48 @@ class MainWindow(QMainWindow):
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        hdr.setSectionResizeMode(13, QHeaderView.ResizeMode.Fixed)
-        tbl.setColumnWidth(0, 62)
-        tbl.setColumnWidth(1, 90)
-        tbl.setColumnWidth(13, 62)
+        tbl.setColumnWidth(0, 70)
+        tbl.setColumnWidth(1, 96)
         hdr.setFixedHeight(44)
+
+        # Render per-TASK summary table below
+        stbl = self.tbl_t1_summary
+        s_headers = [
+            "TASK",
+            "Số người",
+            "Tổng Frame",
+            "Tổng BBOX",
+            "Avg\nFrame/h",
+            "Avg\nBBOX/h",
+            "Err Rate\nBBOX (%)",
+            "Err Rate\nFrame (%)",
+        ]
+        stbl.setColumnCount(len(s_headers))
+        stbl.setHorizontalHeaderLabels(s_headers)
+        stbl.setRowCount(len(groups))
+        task_avg_bg = t["tbl_kpi_bg"]
+        avg_align = Qt.AlignmentFlag.AlignCenter
+        for idx, grp in enumerate(groups):
+            disp_task = grp.task[:-4] if (strip_rew_suffix and grp.task.endswith("_REW")) else grp.task
+            n = len(grp.rows)
+            avg_tip = (
+                f"Chỉ số trung bình & tỉ lệ lỗi của toàn bộ nhóm TASK {disp_task} ({n} người):\n"
+                f"  • Tổng Frame: {_fmt_int(grp.total_work_load)} | Tổng BBOX: {_fmt_int(grp.total_work_bbox)} | Tổng Time: {_fmt_time(grp.total_work_time)}h\n"
+                f"  • Tổng lỗi BBOX: {_fmt_int(grp.total_err_bbox)} ({_fmt_f2(grp.total_task_err_bbox_rate)}%) | Tổng lỗi Frame: {_fmt_int(grp.total_err_frame)} ({_fmt_f2(grp.total_task_err_rate)}%)"
+            )
+            stbl.setItem(idx, 0, self._make_item(disp_task, avg_align, True, t["task_badge_fg"], t["task_badge_bg"], tooltip=avg_tip))
+            stbl.setItem(idx, 1, self._make_item(str(n), avg_align, False, None, task_avg_bg, tooltip=avg_tip))
+            stbl.setItem(idx, 2, self._make_item(_fmt_int(grp.total_work_load), bg=task_avg_bg, tooltip=avg_tip))
+            stbl.setItem(idx, 3, self._make_item(_fmt_int(grp.total_work_bbox), bg=task_avg_bg, tooltip=avg_tip))
+            stbl.setItem(idx, 4, self._make_item(_fmt_f2(grp.avg_frame_per_hour), avg_align, True, t["danger"], bg=task_avg_bg, tooltip=avg_tip))
+            stbl.setItem(idx, 5, self._make_item(_fmt_f2(grp.avg_bbox_per_hour), avg_align, True, t["danger"], bg=task_avg_bg, tooltip=avg_tip))
+            stbl.setItem(idx, 6, self._make_item(_fmt_f2(grp.total_task_err_bbox_rate), avg_align, True, t["danger"], bg=task_avg_bg, tooltip=avg_tip))
+            stbl.setItem(idx, 7, self._make_item(_fmt_f2(grp.total_task_err_rate), avg_align, True, t["danger"], bg=task_avg_bg, tooltip=avg_tip))
+        shdr = stbl.horizontalHeader()
+        shdr.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        shdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        stbl.setColumnWidth(0, 96)
+        shdr.setFixedHeight(38)
 
     def _render_person_summary_table(self, tbl: QTableWidget, delegate: ReportTableDelegate, rows, name_col_hdr: str = "Annotator", err_prefix: str = "Err"):
         t = self.theme
@@ -1571,9 +2032,7 @@ class MainWindow(QMainWindow):
         # Populate Worker Ranking
         w_tbl = self.tbl_rank_worker
         w_headers = [
-            "Hạng", "Annotator", "Work\nLoad", "Work\nBBOX", "Work\nTime",
-            "Err\nFrame", "Err\nBBOX", "Err Rate\nFrame (%)", "Err Rate\nBBOX (%)",
-            "FRAME\n/ Hour", "BBOX\n/ Hour",
+            "Hạng", "Annotator", "Err Rate\nFrame (%)", "Err Rate\nBBOX (%)",
         ]
         w_tbl.setColumnCount(len(w_headers))
         w_tbl.setHorizontalHeaderLabels(w_headers)
@@ -1594,29 +2053,18 @@ class MainWindow(QMainWindow):
             )
             w_tbl.setItem(idx, 0, self._make_item(rank_lbl, Qt.AlignmentFlag.AlignCenter, True, rate_fg if is_top3 else None, bg, tip))
             w_tbl.setItem(idx, 1, self._make_item(r.annotator, Qt.AlignmentFlag.AlignCenter, True, None, bg, tip, user_data=(r.annotator, has_any_issue)))
-            w_tbl.setItem(idx, 2, self._make_item(_fmt_int(r.work_load), bg=bg, tooltip=tip))
-            w_tbl.setItem(idx, 3, self._make_item(_fmt_int(r.work_bbox), bg=bg, tooltip=tip))
-            w_tbl.setItem(idx, 4, self._make_item(_fmt_time(r.work_time), bg=bg, tooltip=tip))
-            w_tbl.setItem(idx, 5, self._make_item(_fmt_int(r.total_err_frame), bg=bg, tooltip=tip))
-            w_tbl.setItem(idx, 6, self._make_item(_fmt_int(r.total_err_bbox), bg=bg, tooltip=tip))
-            w_tbl.setItem(idx, 7, self._make_item(_fmt_f2(r.total_err_rate), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
-            w_tbl.setItem(idx, 8, self._make_item(_fmt_f2(r.total_err_bbox_rate), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
-            w_tbl.setItem(idx, 9, self._make_item(_fmt_f2(r.frame_per_hour), bold=True, bg=bg or t["tbl_kpi_bg"], tooltip=tip))
-            w_tbl.setItem(idx, 10, self._make_item(_fmt_f2(r.bbox_per_hour), bold=True, bg=bg or t["tbl_kpi_bg"], tooltip=tip))
+            w_tbl.setItem(idx, 2, self._make_item(_fmt_f2(r.total_err_rate), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
+            w_tbl.setItem(idx, 3, self._make_item(_fmt_f2(r.total_err_bbox_rate), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
         wh = w_tbl.horizontalHeader()
         wh.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         wh.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        wh.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        w_tbl.setColumnWidth(0, 56)
-        w_tbl.setColumnWidth(1, 86)
+        w_tbl.setColumnWidth(0, 64)
         wh.setFixedHeight(42)
 
         # Populate Reviewer Lần 1 Ranking
         r_tbl = self.tbl_rank_reviewer
         r_headers = [
-            "Hạng", "Reviewer", "Work\nLoad", "Work\nBBOX", "Work\nTime",
-            "Pangyo\nFrame", "Pangyo\nBBOX", "Err Rate\nFrame (%)", "Err Rate\nBBOX (%)",
-            "1st Insp.\nRecall (%)", "FRAME\n/ Hour",
+            "Hạng", "Reviewer", "Err Rate\nFrame (%)", "Err Rate\nBBOX (%)",
         ]
         r_tbl.setColumnCount(len(r_headers))
         r_tbl.setHorizontalHeaderLabels(r_headers)
@@ -1635,21 +2083,12 @@ class MainWindow(QMainWindow):
             )
             r_tbl.setItem(idx, 0, self._make_item(rank_lbl, Qt.AlignmentFlag.AlignCenter, True, rate_fg if is_top3 else None, bg, tip))
             r_tbl.setItem(idx, 1, self._make_item(g.inspector, Qt.AlignmentFlag.AlignCenter, True, None, bg, tip))
-            r_tbl.setItem(idx, 2, self._make_item(_fmt_int(g.total_work_load), bg=bg, tooltip=tip))
-            r_tbl.setItem(idx, 3, self._make_item(_fmt_int(g.total_work_bbox), bg=bg, tooltip=tip))
-            r_tbl.setItem(idx, 4, self._make_item(_fmt_time(g.total_work_time), bg=bg, tooltip=tip))
-            r_tbl.setItem(idx, 5, self._make_item(_fmt_int(g.total_err_second), bg=bg, tooltip=tip))
-            r_tbl.setItem(idx, 6, self._make_item(_fmt_int(g.total_err_second_bbox), bg=bg, tooltip=tip))
-            r_tbl.setItem(idx, 7, self._make_item(_fmt_f2(g.err_rate_frame), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
-            r_tbl.setItem(idx, 8, self._make_item(_fmt_f2(g.err_rate_bbox), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
-            r_tbl.setItem(idx, 9, self._make_item(f"{g.first_inspector_recall:.0f}%", Qt.AlignmentFlag.AlignCenter, True, t["accent_text"], bg=bg, tooltip=tip))
-            r_tbl.setItem(idx, 10, self._make_item(_fmt_f2(g.frame_per_hour), bold=True, bg=bg or t["tbl_kpi_bg"], tooltip=tip))
+            r_tbl.setItem(idx, 2, self._make_item(_fmt_f2(g.err_rate_frame), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
+            r_tbl.setItem(idx, 3, self._make_item(_fmt_f2(g.err_rate_bbox), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
         rh = r_tbl.horizontalHeader()
         rh.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         rh.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        rh.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        r_tbl.setColumnWidth(0, 56)
-        r_tbl.setColumnWidth(1, 86)
+        r_tbl.setColumnWidth(0, 64)
         rh.setFixedHeight(42)
 
     def _render_audit_table(self, rep: ReportResult):
@@ -1884,7 +2323,7 @@ class MainWindow(QMainWindow):
     def copy_current_table(self):
         idx = self.tabs.currentIndex()
         if idx == 0:
-            tbl = self.tbl_t1
+            tbl = self.tbl_t1_summary if self.tbl_t1_summary.hasFocus() else self.tbl_t1
         elif idx == 1:
             tbl = self.tbl_t2
         elif idx == 2:
@@ -1917,8 +2356,10 @@ class MainWindow(QMainWindow):
             return
         inc_t1 = self.chk_exp_t1.isChecked()
         inc_t2 = self.chk_exp_t2.isChecked()
+        inc_rev = self.chk_exp_rev.isChecked()
+        inc_rank = self.chk_exp_rank.isChecked()
         inc_au = self.chk_exp_audit.isChecked()
-        if not (inc_t1 or inc_t2 or inc_au):
+        if not (inc_t1 or inc_t2 or inc_rev or inc_rank or inc_au):
             self.toast.show_toast("Hãy tick ít nhất 1 sheet để xuất Excel!", "warn")
             return
 
@@ -1943,6 +2384,8 @@ class MainWindow(QMainWindow):
                 out_path,
                 include_template1=inc_t1,
                 include_template2=inc_t2,
+                include_reviewer=inc_rev,
+                include_ranking=inc_rank,
                 include_audit=inc_au,
                 highlight_mismatch=self.chk_highlight.isChecked(),
             )

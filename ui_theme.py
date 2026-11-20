@@ -6,34 +6,35 @@ from PyQt6.QtWidgets import QStyledItemDelegate
 
 LIGHT_THEME = {
     "name": "light",
-    "bg_canvas": "#F4F6FA",
-    "bg_surface": "#FFFFFF",
-    "bg_subtle": "#F8FAFC",
-    "bg_hover": "#EFF6FF",
-    "bg_selected": "#DBEAFE",
-    "border": "#E2E8F0",
-    "border_strong": "#CBD5E1",
+    "bg_canvas": "#D8E0EA",
+    "bg_surface": "#E6ECF3",
+    "bg_subtle": "#DCE4EE",
+    "bg_hover": "#CDD9E8",
+    "bg_selected": "#BFD6F6",
+    "border": "#BCC8D8",
+    "border_strong": "#94A3B8",
     "text_primary": "#0F172A",
-    "text_secondary": "#475569",
-    "text_muted": "#64748B",
+    "text_secondary": "#1E293B",
+    "text_muted": "#475569",
     "accent": "#2563EB",
     "accent_hover": "#1D4ED8",
-    "accent_soft": "#EFF6FF",
+    "accent_soft": "#DBEAFE",
     "accent_text": "#1D4ED8",
     "success": "#059669",
     "success_hover": "#047857",
-    "success_soft": "#ECFDF5",
-    "warn": "#D97706",
-    "warn_soft": "#FFFBEB",
-    "warn_border": "#FDE68A",
+    "success_soft": "#D1FAE5",
+    "warn": "#B45309",
+    "warn_soft": "#FEF3C7",
+    "warn_border": "#F59E0B",
     "danger": "#DC2626",
-    "danger_soft": "#FEF2F2",
+    "danger_soft": "#FEE2E2",
+    "tbl_bg": "#FFFFFF",
     "tbl_header_bg": "#1E293B",
     "tbl_header_fg": "#F8FAFC",
     "tbl_header_border": "#334155",
-    "tbl_grid": "#E2E8F0",
+    "tbl_grid": "#CBD5E1",
     "tbl_divider": "#0F172A",
-    "tbl_kpi_bg": "#F8FAFC",
+    "tbl_kpi_bg": "#F1F5F9",
     "task_badge_bg": "#1E293B",
     "task_badge_fg": "#FFFFFF",
 }
@@ -62,6 +63,7 @@ DARK_THEME = {
     "warn_border": "#92400E",
     "danger": "#F87171",
     "danger_soft": "#450A0A",
+    "tbl_bg": "#111827",
     "tbl_header_bg": "#0F172A",
     "tbl_header_fg": "#F8FAFC",
     "tbl_header_border": "#334155",
@@ -90,6 +92,7 @@ SVG_ICONS = {
     "search": """<svg viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>""",
     "folder": """<svg viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>""",
     "calendar": """<svg viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>""",
+    "cloud": """<svg viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>""",
 }
 
 
@@ -195,6 +198,42 @@ QLineEdit, QDateEdit, QComboBox {{
 }}
 QLineEdit:focus, QDateEdit:focus, QComboBox:focus {{
     border: 1.5px solid {t["accent"]};
+}}
+QComboBox::drop-down {{
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 24px;
+    background-color: {t["bg_subtle"]};
+    border-left: 1px solid {t["border_strong"]};
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+}}
+QComboBox::drop-down:hover {{
+    background-color: {t["accent_soft"]};
+}}
+QComboBox QAbstractItemView {{
+    background-color: {t["bg_surface"]};
+    color: {t["text_primary"]};
+    border: 1px solid {t["border_strong"]};
+    border-radius: 6px;
+    padding: 3px;
+    outline: none;
+    selection-background-color: {t["accent"]};
+    selection-color: #FFFFFF;
+}}
+QComboBox QAbstractItemView::item {{
+    padding: 5px 10px;
+    min-height: 22px;
+    color: {t["text_primary"]};
+    background-color: {t["bg_surface"]};
+}}
+QComboBox QAbstractItemView::item:hover {{
+    background-color: {t["bg_hover"]};
+    color: {t["text_primary"]};
+}}
+QComboBox QAbstractItemView::item:selected {{
+    background-color: {t["accent"]};
+    color: #FFFFFF;
 }}
 QDateEdit::drop-down {{
     subcontrol-origin: padding;
@@ -322,6 +361,11 @@ QPushButton#PresetBtn:hover {{
     border-color: {t["accent"]};
     color: {t["accent_text"]};
 }}
+QPushButton#PresetBtn:checked {{
+    background-color: {t["accent"]};
+    border-color: {t["accent"]};
+    color: #FFFFFF;
+}}
 
 /* Segmented Control */
 QFrame#SegmentedWrap {{
@@ -407,7 +451,7 @@ QTabBar QToolButton {{
 
 /* Tables */
 QTableWidget {{
-    background-color: {t["bg_surface"]};
+    background-color: {t["tbl_bg"]};
     gridline-color: {t["tbl_grid"]};
     border: none;
     selection-background-color: {t["bg_selected"]};

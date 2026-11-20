@@ -447,26 +447,19 @@ def _write_ranking_sheet(wb: openpyxl.Workbook, report: ReportResult):
     )
 
     def write_rank_block(start_row: int, title: str, name_hdr: str, rows_list, is_rev: bool = False) -> int:
-        ws.merge_cells(start_row=start_row, start_column=1, end_row=start_row, end_column=11)
+        ws.merge_cells(start_row=start_row, start_column=1, end_row=start_row, end_column=4)
         ws.cell(start_row, 1, title)
         ws.cell(start_row, 1).font = FONT_AUDIT_HDR
         ws.row_dimensions[start_row].height = 24
-        for c in range(1, 12):
+        for c in range(1, 5):
             ws.cell(start_row, c).fill = DARK_HEADER_FILL
 
         hdr_row = start_row + 1
         hdrs = [
             "Hạng",
             name_hdr,
-            "Work Load (Frame)",
-            "Work BBOX",
-            "Work Time",
-            "Pangyo Frame" if is_rev else "Err Frame",
-            "Pangyo BBOX" if is_rev else "Err BBOX",
             "Err Rate Frame (%)",
             "Err Rate BBOX (%)",
-            "1st Insp. Recall (%)" if is_rev else "FRAME / Hour",
-            "FRAME / Hour" if is_rev else "BBOX / Hour",
         ]
         ws.row_dimensions[hdr_row].height = 28
         for c, h in enumerate(hdrs, start=1):
@@ -482,28 +475,14 @@ def _write_ranking_sheet(wb: openpyxl.Workbook, report: ReportResult):
             ws.cell(cur, 1, rank_idx)
             if is_rev:
                 ws.cell(cur, 2, rdata.inspector)
-                ws.cell(cur, 3, _clean_num(rdata.total_work_load))
-                ws.cell(cur, 4, _clean_num(rdata.total_work_bbox))
-                ws.cell(cur, 5, _clean_num(rdata.total_work_time))
-                ws.cell(cur, 6, _clean_num(rdata.total_err_second))
-                ws.cell(cur, 7, _clean_num(rdata.total_err_second_bbox))
-                ws.cell(cur, 8, f"=IF(C{cur}>0,F{cur}/C{cur}*100,0)")
-                ws.cell(cur, 9, f"=IF(D{cur}>0,G{cur}/D{cur}*100,0)")
-                ws.cell(cur, 10, round(rdata.first_inspector_recall, 0) / 100.0)
-                ws.cell(cur, 11, f"=IF(E{cur}>0,C{cur}/E{cur},0)")
+                ws.cell(cur, 3, round(rdata.err_rate_frame, 2))
+                ws.cell(cur, 4, round(rdata.err_rate_bbox, 2))
             else:
                 ws.cell(cur, 2, rdata.annotator)
-                ws.cell(cur, 3, _clean_num(rdata.work_load))
-                ws.cell(cur, 4, _clean_num(rdata.work_bbox))
-                ws.cell(cur, 5, _clean_num(rdata.work_time))
-                ws.cell(cur, 6, _clean_num(rdata.total_err_frame))
-                ws.cell(cur, 7, _clean_num(rdata.total_err_bbox))
-                ws.cell(cur, 8, f"=IF(C{cur}>0,F{cur}/C{cur}*100,0)")
-                ws.cell(cur, 9, f"=IF(D{cur}>0,G{cur}/D{cur}*100,0)")
-                ws.cell(cur, 10, f"=IF(E{cur}>0,C{cur}/E{cur},0)")
-                ws.cell(cur, 11, f"=IF(E{cur}>0,D{cur}/E{cur},0)")
+                ws.cell(cur, 3, round(rdata.total_err_rate, 2))
+                ws.cell(cur, 4, round(rdata.total_err_bbox_rate, 2))
 
-            for c in range(1, 12):
+            for c in range(1, 5):
                 cell = ws.cell(cur, c)
                 cell.border = _make_border(THIN_GRAY, THIN_GRAY, THIN_GRAY, THIN_GRAY)
                 if rank_idx <= 3:
@@ -511,20 +490,8 @@ def _write_ranking_sheet(wb: openpyxl.Workbook, report: ReportResult):
                 if c in (1, 2):
                     cell.font = FONT_BOLD
                     cell.alignment = ALIGN_CENTER
-                elif c in (3, 4, 5, 6, 7):
-                    cell.font = FONT_REGULAR
-                    cell.alignment = ALIGN_RIGHT
-                    cell.number_format = "0.##" if c == 5 else "#,##0"
-                elif c in (8, 9):
-                    cell.font = FONT_RED_BOLD if rank_idx > 3 else FONT_GREEN_BOLD
-                    cell.alignment = ALIGN_RIGHT
-                    cell.number_format = "0.00"
-                elif is_rev and c == 10:
-                    cell.font = FONT_BOLD
-                    cell.alignment = ALIGN_CENTER
-                    cell.number_format = "0%"
                 else:
-                    cell.font = FONT_BOLD
+                    cell.font = FONT_RED_BOLD if rank_idx > 3 else FONT_GREEN_BOLD
                     cell.alignment = ALIGN_RIGHT
                     cell.number_format = "0.00"
             cur += 1
@@ -545,7 +512,7 @@ def _write_ranking_sheet(wb: openpyxl.Workbook, report: ReportResult):
         is_rev=True,
     )
 
-    widths = [8, 16, 16, 14, 12, 12, 12, 16, 16, 15, 14]
+    widths = [10, 22, 20, 20]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
@@ -732,37 +699,32 @@ def export_report_to_excel(
     output_path: str,
     include_template1: bool = True,
     include_template2: bool = True,
+    include_reviewer: bool = True,
+    include_ranking: bool = True,
     include_audit: bool = True,
     highlight_mismatch: bool = True,
 ):
     wb = openpyxl.Workbook()
-    first_used = False
+    default_ws = wb.active
+    used_default = False
 
     if include_template1:
         _write_template1_by_task(wb, report, highlight_mismatch=highlight_mismatch)
-        first_used = True
+        used_default = True
 
     if include_template2:
-        if not first_used:
-            # Remove default empty sheet after creating Template 2
-            default_ws = wb.active
-            _write_template2_by_annotator(wb, report, highlight_mismatch=highlight_mismatch)
-            wb.remove(default_ws)
-            first_used = True
-        else:
-            _write_template2_by_annotator(wb, report, highlight_mismatch=highlight_mismatch)
+        _write_template2_by_annotator(wb, report, highlight_mismatch=highlight_mismatch)
 
-    # Always include the Reviewer sheet and Ranking sheet
-    if first_used:
+    if include_reviewer:
         _write_reviewer_sheet(wb, report)
+
+    if include_ranking:
         _write_ranking_sheet(wb, report)
 
     if include_audit:
-        if not first_used:
-            default_ws = wb.active
-            _write_audit_and_notes_sheet(wb, report)
-            wb.remove(default_ws)
-        else:
-            _write_audit_and_notes_sheet(wb, report)
+        _write_audit_and_notes_sheet(wb, report)
+
+    if not used_default and len(wb.sheetnames) > 1 and default_ws in wb.worksheets:
+        wb.remove(default_ws)
 
     wb.save(output_path)
