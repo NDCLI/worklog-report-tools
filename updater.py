@@ -255,6 +255,7 @@ def _build_portable_updater_ps1(
     """
     backup_exe = os.path.join(update_dir, "rollback_backup.exe")
     target_dir = os.path.dirname(target_exe)
+    log_file = os.path.join(tempfile.gettempdir(), "ReportTools_AutoUpdate.log")
 
     return f"""$ErrorActionPreference = 'Stop'
 
@@ -263,8 +264,19 @@ $TargetDir  = {_ps_quote(target_dir)}
 $StagedExe  = {_ps_quote(staged_exe)}
 $BackupExe  = {_ps_quote(backup_exe)}
 $UpdateDir  = {_ps_quote(update_dir)}
+$LogFile    = {_ps_quote(log_file)}
 $CurrentPid = {int(current_pid)}
 $ParentPid  = {int(parent_pid)}
+
+function Write-Log([string]$Msg) {{
+    try {{
+        $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff')
+        Add-Content -LiteralPath $LogFile -Value "[$ts] $Msg" -Encoding UTF8 -ErrorAction SilentlyContinue
+    }} catch {{}}
+}}
+
+try {{ Set-Content -LiteralPath $LogFile -Value "" -Encoding UTF8 -ErrorAction SilentlyContinue }} catch {{}}
+Write-Log "Updater started. Target=$TargetExe Staged=$StagedExe CurrentPid=$CurrentPid ParentPid=$ParentPid"
 
 function Test-PidAlive([int]$ProcId) {{
     if ($ProcId -le 0) {{ return $false }}
@@ -281,6 +293,7 @@ if ($ParentPid -gt 0 -and $ParentPid -ne $CurrentPid) {{
         }}
     }} catch {{}}
 }}
+Write-Log "Waiting for PIDs: $($WaitPids -join ', ')"
 
 # 1. Wait for app & bootloader to exit completely (up to 45s)
 for ($i = 0; $i -lt 225; $i++) {{
@@ -299,10 +312,12 @@ for ($i = 0; $i -lt 225; $i++) {{
 Start-Sleep -Milliseconds 400
 
 if (-not (Test-Path -LiteralPath $StagedExe)) {{
+    Write-Log "ERROR: StagedExe missing: $StagedExe"
     exit 1
 }}
 
 $ExpectedSize = (Get-Item -LiteralPath $StagedExe).Length
+Write-Log "All target PIDs exited. ExpectedSize=$ExpectedSize"
 
 # Keep a temporary rollback backup inside %TEMP% (never inside the portable folder)
 if (Test-Path -LiteralPath $TargetExe) {{
@@ -321,6 +336,7 @@ for ($attempt = 0; $attempt -lt 60; $attempt++) {{
         $ActualSize = (Get-Item -LiteralPath $TargetExe).Length
         if ($ActualSize -eq $ExpectedSize) {{
             $Replaced = $true
+            Write-Log "Replaced successfully on attempt $($attempt + 1). ActualSize=$ActualSize"
             break
         }}
     }} catch {{
@@ -330,6 +346,7 @@ for ($attempt = 0; $attempt -lt 60; $attempt++) {{
 }}
 
 if (-not $Replaced) {{
+    Write-Log "ERROR: Replace failed after retries. LastErr=$LastErr"
     # Restore backup if target was damaged
     if ((Test-Path -LiteralPath $BackupExe) -and (-not (Test-Path -LiteralPath $TargetExe))) {{
         try {{
@@ -362,6 +379,7 @@ foreach ($envName in @(
 }}
 
 # 5. Launch the newly replaced portable executable
+Write-Log "Launching updated exe: $TargetExe"
 Start-Process -FilePath $TargetExe -WorkingDirectory $TargetDir
 
 # 6. Clean up this script and update temp folder
@@ -371,6 +389,7 @@ try {{
         Remove-Item -LiteralPath $UpdateDir -Recurse -Force -ErrorAction SilentlyContinue
     }}
 }} catch {{}}
+Write-Log "Updater finished."
 """
 
 
@@ -427,9 +446,10 @@ def launch_in_place_updater(staged_exe: str, target_exe: Optional[str] = None) -
     ):
         clean_env.pop(k, None)
 
+    # NOTE: Never combine CREATE_NO_WINDOW with DETACHED_PROCESS on Windows —
+    # they are mutually exclusive and cause powershell.exe to exit immediately without running -File!
     creationflags = (
         getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-        | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
         | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
     )
     startupinfo = subprocess.STARTUPINFO()
@@ -447,7 +467,7 @@ def launch_in_place_updater(staged_exe: str, target_exe: Optional[str] = None) -
             "-File",
             script_path,
         ],
-        cwd=update_dir,
+        cwd=tempfile.gettempdir(),
         env=clean_env,
         close_fds=True,
         creationflags=creationflags,
@@ -937,6 +957,8 @@ class UpdateDialog(QDialog):
 
     def _quit_for_restart(self):
         self.accept()
+        if self.parent() is not None and hasattr(self.parent(), "close"):
+            self.parent().close()
         app = QApplication.instance()
         if app is not None:
             app.quit()
