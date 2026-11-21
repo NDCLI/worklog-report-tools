@@ -74,7 +74,7 @@ from updater import (
 
 
 APP_NAME = "Annotator & Inspector Report"
-APP_VERSION = "2.3"
+APP_VERSION = "2.4"
 
 DEFAULT_SP_WL_URL = (
     "https://hanwhaworkplace.sharepoint.com/:x:/r/sites/HVV-AILabAnnotation/"
@@ -952,14 +952,6 @@ class MainWindow(QMainWindow):
         sp_title = QLabel("☁ Đăng nhập SharePoint (Online)")
         sp_title.setStyleSheet("font-size: 15px; font-weight: 700;")
         sp_lay.addWidget(sp_title)
-
-        sp_desc = QLabel(
-            "Đăng nhập trực tiếp bằng tài khoản Microsoft công ty (không cần IT duyệt) "
-            "và bấm tải dữ liệu. Các link SharePoint mặc định (Work_log, Review, Distribution) đã được cấu hình sẵn."
-        )
-        sp_desc.setWordWrap(True)
-        sp_desc.setStyleSheet("font-size: 12px; color: #64748B;")
-        sp_lay.addWidget(sp_desc)
 
         self.w_sp_links_box = QWidget()
         sp_form = QFormLayout(self.w_sp_links_box)
