@@ -74,7 +74,7 @@ from updater import (
 
 
 APP_NAME = "Annotator & Inspector Report"
-APP_VERSION = "2.4"
+APP_VERSION = "2.5"
 
 DEFAULT_SP_WL_URL = (
     "https://hanwhaworkplace.sharepoint.com/:x:/r/sites/HVV-AILabAnnotation/"
@@ -624,6 +624,27 @@ class MainWindow(QMainWindow):
         self.chk_highlight.toggled.connect(self.refresh_report)
         sb_lay.addWidget(self.chk_highlight)
 
+        # Section C2: TASK Filter
+        t_hdr = QHBoxLayout()
+        t_hdr.setSpacing(2)
+        t_hdr.addWidget(self._section_label("LỌC TASK"))
+        t_hdr.addStretch(1)
+        b_tall = QPushButton("Tất cả")
+        b_tall.setObjectName("GhostBtn")
+        b_tall.clicked.connect(lambda: self._set_all_tasks(True))
+        b_tnone = QPushButton("Bỏ")
+        b_tnone.setObjectName("GhostBtn")
+        b_tnone.clicked.connect(lambda: self._set_all_tasks(False))
+        t_hdr.addWidget(b_tall)
+        t_hdr.addWidget(b_tnone)
+        sb_lay.addLayout(t_hdr)
+
+        self.list_tasks = QListWidget()
+        self.list_tasks.setMaximumHeight(130)
+        self.list_tasks.setToolTip("Tick để chọn/bỏ chọn TASK đưa vào báo cáo tổng hợp & xếp hạng")
+        self.list_tasks.itemChanged.connect(self._on_task_item_changed)
+        sb_lay.addWidget(self.list_tasks)
+
         # Section D: Annotator Filter (1 person or many)
         a_hdr = QHBoxLayout()
         a_hdr.setSpacing(2)
@@ -811,11 +832,18 @@ class MainWindow(QMainWindow):
         rank_lay.addWidget(rank_split, 1)
         self.tabs.addTab(tab_rank, "Bảng Xếp Hạng")
 
-        # Tab 4: Audit, Daily Mismatches & Excel Notes Inspector
+        # Tab 4: Kiểm tra dữ liệu (2 sub-tabs: Check Annotator & Check Reviewer)
         tab_audit = QWidget()
         audit_lay = QVBoxLayout(tab_audit)
         audit_lay.setContentsMargins(10, 10, 10, 10)
         audit_lay.setSpacing(8)
+
+        self.audit_mode_tabs = QTabWidget()
+
+        # Sub-page 0: Check Annotator (existing audit_split)
+        page_ann_audit = QWidget()
+        page_ann_lay = QVBoxLayout(page_ann_audit)
+        page_ann_lay.setContentsMargins(0, 6, 0, 0)
 
         audit_split = QSplitter(Qt.Orientation.Vertical)
         top_a = QWidget()
@@ -864,9 +892,62 @@ class MainWindow(QMainWindow):
         bot_lay.addWidget(self.audit_subtabs, 1)
         audit_split.addWidget(bot_wrap)
         audit_split.setSizes([290, 290])
+        page_ann_lay.addWidget(audit_split)
+        self.audit_mode_tabs.addTab(page_ann_audit, "Check Annotator")
 
-        audit_lay.addWidget(audit_split)
-        self.tabs.addTab(tab_audit, "Đối chiếu && Notes")
+        # Sub-page 1: Check Reviewer (Inspector)
+        page_rev_audit = QWidget()
+        page_rev_lay = QVBoxLayout(page_rev_audit)
+        page_rev_lay.setContentsMargins(0, 6, 0, 0)
+
+        rev_audit_split = QSplitter(Qt.Orientation.Vertical)
+        top_ra = QWidget()
+        top_ralay = QVBoxLayout(top_ra)
+        top_ralay.setContentsMargins(0, 0, 0, 0)
+        top_ralay.setSpacing(5)
+        self.lbl_rev_audit_hdr = QLabel("Đối chiếu Work Log Reviewer vs Inspection & Rework / Work Log Annotator / Distribution")
+        self.lbl_rev_audit_hdr.setStyleSheet("font-weight: 700; font-size: 12.5px;")
+        top_ralay.addWidget(self.lbl_rev_audit_hdr)
+        self.tbl_rev_audit = QTableWidget()
+        self._setup_table(self.tbl_rev_audit)
+        self.tbl_rev_audit.cellClicked.connect(self._on_rev_audit_row_clicked)
+        top_ralay.addWidget(self.tbl_rev_audit)
+        rev_audit_split.addWidget(top_ra)
+
+        bot_rwrap = QWidget()
+        bot_rlay = QVBoxLayout(bot_rwrap)
+        bot_rlay.setContentsMargins(0, 6, 0, 0)
+        bot_rlay.setSpacing(5)
+
+        rfilter_row = QHBoxLayout()
+        self.lbl_rev_detail_hdr = QLabel("Chi tiết đối chiếu Reviewer theo Block & Excel Notes")
+        self.lbl_rev_detail_hdr.setStyleSheet("font-weight: 700; font-size: 12.5px;")
+        rfilter_row.addWidget(self.lbl_rev_detail_hdr)
+        rfilter_row.addStretch(1)
+        rfilter_row.addWidget(QLabel("Lọc theo Reviewer:"))
+        self.cb_rev_audit_filter = QComboBox()
+        self.cb_rev_audit_filter.setMinimumWidth(155)
+        self.cb_rev_audit_filter.currentIndexChanged.connect(self._on_rev_detail_filter_changed)
+        rfilter_row.addWidget(self.cb_rev_audit_filter)
+        bot_rlay.addLayout(rfilter_row)
+
+        self.rev_audit_subtabs = QTabWidget()
+        self.tbl_rev_diffs = QTableWidget()
+        self._setup_table(self.tbl_rev_diffs)
+        self.rev_audit_subtabs.addTab(self.tbl_rev_diffs, "Đối chiếu Start/End (0)")
+
+        self.tbl_rev_notes = QTableWidget()
+        self._setup_table(self.tbl_rev_notes)
+        self.rev_audit_subtabs.addTab(self.tbl_rev_notes, "Excel Notes Reviewer (0)")
+
+        bot_rlay.addWidget(self.rev_audit_subtabs, 1)
+        rev_audit_split.addWidget(bot_rwrap)
+        rev_audit_split.setSizes([290, 290])
+        page_rev_lay.addWidget(rev_audit_split)
+        self.audit_mode_tabs.addTab(page_rev_audit, "Check Reviewer (Inspector)")
+
+        audit_lay.addWidget(self.audit_mode_tabs)
+        self.tabs.addTab(tab_audit, "Kiểm tra dữ liệu")
 
         main_lay.addWidget(self.tabs, 1)
 
@@ -884,7 +965,7 @@ class MainWindow(QMainWindow):
         self.chk_exp_rev.setChecked(True)
         self.chk_exp_rank = QCheckBox("Bảng Xếp Hạng")
         self.chk_exp_rank.setChecked(True)
-        self.chk_exp_audit = QCheckBox("Đối chiếu && Notes")
+        self.chk_exp_audit = QCheckBox("Kiểm tra dữ liệu")
         self.chk_exp_audit.setChecked(True)
         foot.addWidget(self.chk_exp_t1)
         foot.addWidget(self.chk_exp_t2)
@@ -1153,6 +1234,11 @@ class MainWindow(QMainWindow):
             for r_i in range(self.tbl_daily_diffs.rowCount()):
                 if self.tbl_daily_diffs.rowHeight(r_i) < 30:
                     self.tbl_daily_diffs.setRowHeight(r_i, 30)
+        if hasattr(self, "tbl_rev_diffs") and self.tbl_rev_diffs.rowCount() > 0:
+            self.tbl_rev_diffs.resizeRowsToContents()
+            for r_i in range(self.tbl_rev_diffs.rowCount()):
+                if self.tbl_rev_diffs.rowHeight(r_i) < 30:
+                    self.tbl_rev_diffs.setRowHeight(r_i, 30)
 
     # ------------------------------------------------------------------
     # GLOBAL DRAG & DROP (.xlsx anywhere on window)
@@ -1233,6 +1319,9 @@ class MainWindow(QMainWindow):
             self._render_audit_table(self.current_report)
             self._render_daily_diffs_table()
             self._render_notes_table()
+            self._render_reviewer_audit_table(self.current_report)
+            self._render_rev_diffs_table()
+            self._render_rev_notes_table()
 
     def toggle_theme(self):
         next_t = DARK_THEME if self.theme["name"] == "light" else LIGHT_THEME
@@ -1502,8 +1591,20 @@ class MainWindow(QMainWindow):
         self._isolated_annotator = None
         self.isolate_banner.setVisible(False)
 
-        # Build Annotator list
+        # Build TASK & Annotator lists
         self._updating_filters = True
+        self.list_tasks.clear()
+        task_priority = {
+            "OD": 0, "SSEG": 1, "PFE": 2, "ANPR": 3,
+            "OD_REW": 10, "SSEG_REW": 11, "PFE_REW": 12, "ANPR_REW": 13,
+        }
+        for t in sorted(ds.tasks, key=lambda x: (1 if x.endswith("_REW") else 0, task_priority.get(x, 99), x)):
+            it = QListWidgetItem(t)
+            it.setData(Qt.ItemDataRole.UserRole, t)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(Qt.CheckState.Checked)
+            self.list_tasks.addItem(it)
+
         self.list_anns.clear()
         for key, disp in ds.annotators.items():
             it = QListWidgetItem(disp)
@@ -1691,6 +1792,28 @@ class MainWindow(QMainWindow):
         e_d = datetime.date(qd_e.year(), qd_e.month(), qd_e.day())
         return (e_d, s_d) if s_d > e_d else (s_d, e_d)
 
+    def _set_all_tasks(self, checked: bool):
+        self._updating_filters = True
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        for i in range(self.list_tasks.count()):
+            self.list_tasks.item(i).setCheckState(state)
+        self._updating_filters = False
+        self.refresh_report()
+
+    def _on_task_item_changed(self, _item):
+        if not self._updating_filters:
+            self.refresh_report()
+
+    def _get_checked_tasks(self) -> Optional[Set[str]]:
+        if self.list_tasks.count() == 0:
+            return None
+        res = set()
+        for i in range(self.list_tasks.count()):
+            it = self.list_tasks.item(i)
+            if it.checkState() == Qt.CheckState.Checked:
+                res.add(it.data(Qt.ItemDataRole.UserRole))
+        return res
+
     def _set_all_anns(self, checked: bool):
         self._isolated_annotator = None
         self.isolate_banner.setVisible(False)
@@ -1710,7 +1833,7 @@ class MainWindow(QMainWindow):
         self.isolate_banner.setVisible(False)
         s_d, e_d = self._get_period_bounds()
         rep_all = build_report(
-            self.dataset, s_d, e_d, None, None,
+            self.dataset, s_d, e_d, None, self._get_checked_tasks(),
             source_mode=self.seg_source.current_value(),
         )
         active = {r.annotator_key for r in rep_all.all_rows}
@@ -1773,7 +1896,8 @@ class MainWindow(QMainWindow):
         src = self.seg_source.current_value()
 
         # Update sidebar live frame counts per annotator for this date range
-        rep_period_all = build_report(self.dataset, s_d, e_d, None, None, source_mode=src)
+        selected_tasks = self._get_checked_tasks()
+        rep_period_all = build_report(self.dataset, s_d, e_d, None, selected_tasks, source_mode=src)
         fr_by_ann = {}
         for r in rep_period_all.all_rows:
             fr_by_ann[r.annotator_key] = fr_by_ann.get(r.annotator_key, 0.0) + r.work_load
@@ -1792,7 +1916,7 @@ class MainWindow(QMainWindow):
             start_date=s_d,
             end_date=e_d,
             selected_annotators=self._get_checked_annotators(),
-            selected_tasks=None,
+            selected_tasks=selected_tasks,
             source_mode=src,
         )
         self.lbl_period_badge.setText(f"Kỳ báo cáo: {s_d.strftime('%Y.%m.%d')} ~ {e_d.strftime('%Y.%m.%d')}")
@@ -1805,6 +1929,10 @@ class MainWindow(QMainWindow):
         self._populate_note_filter(self.current_report)
         self._render_daily_diffs_table()
         self._render_notes_table()
+        self._render_reviewer_audit_table(self.current_report)
+        self._populate_rev_audit_filter(self.current_report)
+        self._render_rev_diffs_table()
+        self._render_rev_notes_table()
 
     def _make_item(
         self,
@@ -2511,6 +2639,169 @@ class MainWindow(QMainWindow):
             ntbl.scrollToItem(ntbl.item(first_hl_row, 0))
 
     # ------------------------------------------------------------------
+    # REVIEWER AUDIT TAB ("Check Reviewer (Inspector)")
+    # ------------------------------------------------------------------
+    def _render_reviewer_audit_table(self, rep: ReportResult):
+        tbl = self.tbl_rev_audit
+        t = self.theme
+        headers = [
+            "TASK", "Reviewer",
+            "WL Rev\n(Frame)", "Review\n(Frame)", "Lệch\nFrame",
+            "WL Rev\n(BBOX)", "Review\n(BBOX)", "Lệch\nBBOX",
+            "Trạng thái", "Chi tiết ngày"
+        ]
+        tbl.setColumnCount(len(headers))
+        tbl.setHorizontalHeaderLabels(headers)
+        rows = rep.reviewer_audit_rows
+        tbl.setRowCount(len(rows))
+
+        real_cnt = 0
+        pend_cnt = 0
+        for row_i, r in enumerate(rows):
+            sk = r.status_kind
+            if sk == "mismatch":
+                real_cnt += 1
+                bg = t["warn_soft"]
+                st_txt = "⚠ LỆCH DATA"
+                st_fg = t["warn"]
+                st_bg = t["warn_soft"]
+            elif sk == "pending":
+                pend_cnt += 1
+                bg = t["accent_soft"]
+                st_txt = "⏳ Chưa có data"
+                st_fg = t["accent_text"]
+                st_bg = t["accent_soft"]
+            else:
+                bg = None
+                st_txt = "✓ Khớp"
+                st_fg = t["success"]
+                st_bg = t["success_soft"]
+
+            has_any_issue = (sk != "ok")
+            dates_str = r.status_dates_summary or "—"
+            tbl.setItem(row_i, 0, self._make_item(r.task, Qt.AlignmentFlag.AlignCenter, True, bg=bg))
+            tbl.setItem(row_i, 1, self._make_item(r.inspector, Qt.AlignmentFlag.AlignCenter, True, bg=bg, user_data=(r.inspector, has_any_issue)))
+            tbl.setItem(row_i, 2, self._make_item(_fmt_int(r.wl_frames), bg=bg))
+            tbl.setItem(row_i, 3, self._make_item(_fmt_int(r.rw_frames), bg=bg))
+            tbl.setItem(row_i, 4, self._make_item(_fmt_int(r.diff_frame), bold=abs(r.diff_frame) > 1e-6, fg=st_fg if abs(r.diff_frame) > 1e-6 else None, bg=bg))
+            tbl.setItem(row_i, 5, self._make_item(_fmt_int(r.wl_bbox), bg=bg))
+            tbl.setItem(row_i, 6, self._make_item(_fmt_int(r.rw_bbox), bg=bg))
+            tbl.setItem(row_i, 7, self._make_item(_fmt_int(r.diff_bbox), bold=abs(r.diff_bbox) > 1e-6, fg=st_fg if abs(r.diff_bbox) > 1e-6 else None, bg=bg))
+            tbl.setItem(row_i, 8, self._make_item(st_txt, Qt.AlignmentFlag.AlignCenter, True, fg=st_fg, bg=st_bg))
+            tbl.setItem(row_i, 9, self._make_item(dates_str, Qt.AlignmentFlag.AlignCenter, bold=has_any_issue, fg=st_fg if has_any_issue else t["text_muted"], bg=bg))
+
+        self._auto_fit_columns(tbl, headers, header_height=44, stretch_last=True)
+        parts = []
+        if real_cnt:
+            parts.append(f"⚠ {real_cnt} dòng lệch data")
+        if pend_cnt:
+            parts.append(f"⏳ {pend_cnt} dòng chưa có data Review")
+        summary_str = " · ".join(parts) if parts else "✓ Khớp 100%"
+        self.lbl_rev_audit_hdr.setText(
+            f"Đối chiếu Work Log Reviewer vs Inspection & Rework / WL Annotator / Distribution: "
+            f"{len(rows)} dòng ({summary_str}) — bấm 1 dòng để lọc chi tiết bên dưới"
+        )
+
+    def _populate_rev_audit_filter(self, rep: ReportResult):
+        prev = self.cb_rev_audit_filter.currentData()
+        self.cb_rev_audit_filter.blockSignals(True)
+        self.cb_rev_audit_filter.clear()
+        self.cb_rev_audit_filter.addItem("Tất cả Reviewer", "")
+        names = sorted({r.inspector for r in rep.reviewer_audit_rows} | {n.annotator_display for n in rep.reviewer_notes})
+        for nm in names:
+            self.cb_rev_audit_filter.addItem(nm, nm)
+        if prev and prev in names:
+            self.cb_rev_audit_filter.setCurrentIndex(self.cb_rev_audit_filter.findData(prev))
+        self.cb_rev_audit_filter.blockSignals(False)
+
+    def _on_rev_audit_row_clicked(self, row: int, _col: int):
+        it = self.tbl_rev_audit.item(row, 1)
+        if it and it.data(Qt.ItemDataRole.UserRole):
+            insp, has_m = it.data(Qt.ItemDataRole.UserRole)
+            idx = self.cb_rev_audit_filter.findData(insp)
+            if idx >= 0:
+                self.cb_rev_audit_filter.setCurrentIndex(idx)
+            self.rev_audit_subtabs.setCurrentIndex(0 if has_m else 1)
+
+    def _on_rev_detail_filter_changed(self):
+        self._render_rev_diffs_table()
+        self._render_rev_notes_table()
+
+    def _render_rev_diffs_table(self):
+        if not self.current_report:
+            return
+        t = self.theme
+        sel_insp = self.cb_rev_audit_filter.currentData() or ""
+        diffs = [d for d in self.current_report.reviewer_daily_diffs if not sel_insp or d.inspector == sel_insp]
+        real_c = sum(1 for d in diffs if d.kind == "mismatch")
+        pend_c = sum(1 for d in diffs if d.kind == "pending_rework")
+
+        tbl = self.tbl_rev_diffs
+        headers = [
+            "Loại", "Reviewer", "Annotator", "Ngày\nWL", "Ngày\nReview",
+            "TASK", "Frame\nStart ~ End", "WL Rev\n(Fr / BB)", "Review\n(Fr / BB)",
+            "WL Ann\n(Fr / BB)", "Ghi chú / Nguyên nhân"
+        ]
+        tbl.setColumnCount(len(headers))
+        tbl.setHorizontalHeaderLabels(headers)
+        tbl.setRowCount(len(diffs))
+        tbl.setWordWrap(True)
+
+        for row_i, d in enumerate(diffs):
+            is_pend = d.is_pending
+            bg = t["accent_soft"] if is_pend else t["warn_soft"]
+            accent_fg = t["accent_text"] if is_pend else t["warn"]
+            kind_lbl = "⏳ Chưa có data" if is_pend else "⚠ LỆCH DATA"
+            rw_dt_str = d.rw_date.strftime("%Y-%m-%d") if d.rw_date else "—"
+            wl_s = f"{_fmt_int(d.wl_frames)} / {_fmt_int(d.wl_bbox)}" if (d.wl_frames or d.wl_bbox) else "—"
+            rw_s = f"{_fmt_int(d.rw_frames)} / {_fmt_int(d.rw_bbox)}" if (d.rw_frames or d.rw_bbox) else "—"
+            ann_s = f"{_fmt_int(d.ann_frames)} / {_fmt_int(d.ann_bbox)}" if (d.ann_frames or d.ann_bbox) else "—"
+
+            tbl.setItem(row_i, 0, self._make_item(kind_lbl, Qt.AlignmentFlag.AlignCenter, True, fg=accent_fg, bg=bg))
+            tbl.setItem(row_i, 1, self._make_item(d.inspector, Qt.AlignmentFlag.AlignCenter, True, bg=bg))
+            tbl.setItem(row_i, 2, self._make_item(d.annotator, Qt.AlignmentFlag.AlignCenter, True, bg=bg))
+            tbl.setItem(row_i, 3, self._make_item(d.date.strftime("%Y-%m-%d"), Qt.AlignmentFlag.AlignCenter, True, fg=accent_fg, bg=bg))
+            tbl.setItem(row_i, 4, self._make_item(rw_dt_str, Qt.AlignmentFlag.AlignCenter, bg=bg))
+            tbl.setItem(row_i, 5, self._make_item(d.task, Qt.AlignmentFlag.AlignCenter, True, bg=bg))
+            tbl.setItem(row_i, 6, self._make_item(d.frame_range_display, Qt.AlignmentFlag.AlignCenter, True, bg=bg))
+            tbl.setItem(row_i, 7, self._make_item(wl_s, bg=bg))
+            tbl.setItem(row_i, 8, self._make_item(rw_s, bg=bg))
+            tbl.setItem(row_i, 9, self._make_item(ann_s, bg=bg))
+            tbl.setItem(row_i, 10, self._make_item(d.reason, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, True, fg=accent_fg, bg=bg, tooltip=d.reason))
+
+        self._auto_fit_columns(tbl, headers, header_height=44, stretch_last=True)
+        tbl.resizeRowsToContents()
+        for r_i in range(tbl.rowCount()):
+            if tbl.rowHeight(r_i) < 30:
+                tbl.setRowHeight(r_i, 30)
+        self.rev_audit_subtabs.setTabText(0, f"Đối chiếu Start/End ({real_c} lệch · {pend_c} chưa có data)")
+        suffix = f" của {sel_insp}" if sel_insp else ""
+        self.lbl_rev_detail_hdr.setText(f"Chi tiết đối chiếu Reviewer theo Block & Excel Notes{suffix}")
+
+    def _render_rev_notes_table(self):
+        if not self.current_report:
+            return
+        t = self.theme
+        sel_insp = self.cb_rev_audit_filter.currentData() or ""
+        notes = [n for n in self.current_report.reviewer_notes if not sel_insp or n.annotator_display == sel_insp]
+        ntbl = self.tbl_rev_notes
+        headers = ["Reviewer", "Ngày", "TASK", "Frame", "BBOX (Note)", "Nội dung Note gốc"]
+        ntbl.setColumnCount(len(headers))
+        ntbl.setHorizontalHeaderLabels(headers)
+        ntbl.setRowCount(len(notes))
+        for row_i, n in enumerate(notes):
+            ntbl.setItem(row_i, 0, self._make_item(n.annotator_display, Qt.AlignmentFlag.AlignCenter, True))
+            ntbl.setItem(row_i, 1, self._make_item(n.date.strftime("%Y-%m-%d"), Qt.AlignmentFlag.AlignCenter))
+            ntbl.setItem(row_i, 2, self._make_item(n.task, Qt.AlignmentFlag.AlignCenter))
+            ntbl.setItem(row_i, 3, self._make_item(_fmt_int(n.frames_in_cell)))
+            bb_str = _fmt_int(n.parsed_bbox) if n.parsed_bbox is not None else "(trống)"
+            bb_fg = t["accent_text"] if n.parsed_bbox is not None else t["danger"]
+            ntbl.setItem(row_i, 4, self._make_item(bb_str, bold=True, fg=bb_fg))
+            ntbl.setItem(row_i, 5, self._make_item(n.raw_note.replace("\n", " | "), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
+        self._auto_fit_columns(ntbl, headers, header_height=44, stretch_last=True)
+        self.rev_audit_subtabs.setTabText(1, f"Excel Notes Reviewer ({len(notes)})")
+
+    # ------------------------------------------------------------------
     # DRILL-DOWN CLICK HANDLERS
     # ------------------------------------------------------------------
     def _jump_to_audit_for(self, ann_name: str, has_mismatch: bool):
@@ -2520,6 +2811,7 @@ class MainWindow(QMainWindow):
         if idx >= 0:
             self.cb_note_ann.setCurrentIndex(idx)
         self.tabs.setCurrentIndex(4)
+        self.audit_mode_tabs.setCurrentIndex(0)
         self.audit_subtabs.setCurrentIndex(0 if has_mismatch else 1)
 
     def _on_t1_double_click(self, row: int, _col: int):
@@ -2579,10 +2871,18 @@ class MainWindow(QMainWindow):
         elif idx == 3:
             tbl = self.tbl_rank_reviewer if self.tbl_rank_reviewer.hasFocus() else self.tbl_rank_worker
         else:
-            if self.audit_subtabs.currentIndex() == 0 and self.tbl_daily_diffs.rowCount() > 0:
-                tbl = self.tbl_daily_diffs
+            if self.audit_mode_tabs.currentIndex() == 1:
+                if self.rev_audit_subtabs.currentIndex() == 0 and self.tbl_rev_diffs.rowCount() > 0:
+                    tbl = self.tbl_rev_diffs
+                elif self.rev_audit_subtabs.currentIndex() == 1 and self.tbl_rev_notes.rowCount() > 0:
+                    tbl = self.tbl_rev_notes
+                else:
+                    tbl = self.tbl_rev_audit
             else:
-                tbl = self.tbl_audit
+                if self.audit_subtabs.currentIndex() == 0 and self.tbl_daily_diffs.rowCount() > 0:
+                    tbl = self.tbl_daily_diffs
+                else:
+                    tbl = self.tbl_audit
         if tbl.rowCount() == 0:
             self.toast.show_toast("Không có dữ liệu để copy.", "warn")
             return

@@ -60,10 +60,19 @@ FIRST_REVIEWER_KEYS = {
     "MLINH", "THUY", "NGAN", "XUAN", "HIEN03", "KNGAN", "NGUYEN"
 }
 
-# Skip sample & reviewer sheets in Work_log (1st Reviewers are aggregated directly from Inspection_And_Rework)
-SKIP_WORKLOG_SHEETS = {
-    "SAMPLE", "HIEN", "CUC", "MLINH", "THUY", "NGAN", "XUAN", "HIEN_03", "KNGAN", "NGUYEN"
+# Skip sample & legacy sheets in Work_log
+SKIP_NON_DATA_WORKLOG_SHEETS = {
+    "SAMPLE", "HIEN", "CUC"
 }
+# Legacy alias kept for compatibility
+SKIP_WORKLOG_SHEETS = SKIP_NON_DATA_WORKLOG_SHEETS | {
+    "MLINH", "THUY", "NGAN", "XUAN", "HIEN_03", "KNGAN", "NGUYEN"
+}
+
+
+def strip_rew_suffix(task: str) -> str:
+    t = normalize_task(task)
+    return t[:-4] if t.endswith("_REW") else t
 
 # Skip example & legacy (~1 year old, 2024 / early 2025) sheets in Inspection_And_Rework
 SKIP_REWORK_SHEETS = {
@@ -291,6 +300,8 @@ class DistributionJobRecord:
     assignee_raw: str = ""                     # Raw NAME column text (e.g. 'C.Linh (33050-)')
     assignee_keys: Tuple[str, ...] = ()        # Normalized annotator keys (e.g. ('CLINH',))
     cvat_task_id: str = ""                     # CVAT Task ID after /tasks/ (e.g. '735')
+    reviewer_raw: str = ""                     # Raw INSPECTION column text (e.g. 'Hien.03(32500-32559)')
+    reviewer_keys: Tuple[str, ...] = ()        # Normalized reviewer keys (e.g. ('HIEN03',))
 
 
 @dataclass
@@ -338,6 +349,9 @@ class LoadedDataset:
     worklog_daily: List[WorklogDailyRecord] = field(default_factory=list)
     worklog_blocks: List[WorklogBlockRecord] = field(default_factory=list)
     worklog_notes: List[WorklogNoteRecord] = field(default_factory=list)
+    reviewer_worklog_daily: List[WorklogDailyRecord] = field(default_factory=list)
+    reviewer_worklog_blocks: List[WorklogBlockRecord] = field(default_factory=list)
+    reviewer_worklog_notes: List[WorklogNoteRecord] = field(default_factory=list)
     rework_records: List[ReworkRecord] = field(default_factory=list)
     distribution_jobs: List[DistributionJobRecord] = field(default_factory=list)
     annotators: Dict[str, str] = field(default_factory=dict)  # key -> display name
@@ -416,10 +430,23 @@ def _resolve_col_dates(rows: list, month_row_idx: Optional[int], date_row_idx: i
     return col_dates
 
 
-def parse_worklog(xlsx_path: str, progress_cb=None) -> Tuple[List[WorklogDailyRecord], List[WorklogBlockRecord], List[WorklogNoteRecord], List[str]]:
+def parse_worklog(
+    xlsx_path: str, progress_cb=None
+) -> Tuple[
+    List[WorklogDailyRecord],
+    List[WorklogBlockRecord],
+    List[WorklogNoteRecord],
+    List[str],
+    List[WorklogDailyRecord],
+    List[WorklogBlockRecord],
+    List[WorklogNoteRecord],
+]:
     daily_records: List[WorklogDailyRecord] = []
     block_records: List[WorklogBlockRecord] = []
     note_records: List[WorklogNoteRecord] = []
+    rev_daily: List[WorklogDailyRecord] = []
+    rev_blocks: List[WorklogBlockRecord] = []
+    rev_notes: List[WorklogNoteRecord] = []
     warnings: List[str] = []
 
     if progress_cb:
@@ -437,7 +464,7 @@ def parse_worklog(xlsx_path: str, progress_cb=None) -> Tuple[List[WorklogDailyRe
             pct = 15 + int((s_idx / total_sheets) * 45)
             progress_cb(pct, f"Đang đọc Work_log sheet: {sname} ({s_idx+1}/{total_sheets})")
 
-        if sname.strip().upper() in SKIP_WORKLOG_SHEETS:
+        if sname.strip().upper() in SKIP_NON_DATA_WORKLOG_SHEETS:
             continue
 
         ws = wb[sname]
@@ -552,7 +579,8 @@ def parse_worklog(xlsx_path: str, progress_cb=None) -> Tuple[List[WorklogDailyRe
                         rec.bbox += bbox_val
                         if ref not in rec.cell_refs:
                             rec.cell_refs.append(ref)
-                    note_records.append(WorklogNoteRecord(
+                    target_notes = rev_notes if ann_key in FIRST_REVIEWER_KEYS else note_records
+                    target_notes.append(WorklogNoteRecord(
                         annotator_key=ann_key,
                         annotator_display=ann_disp,
                         sheet_name=sname,
@@ -567,7 +595,8 @@ def parse_worklog(xlsx_path: str, progress_cb=None) -> Tuple[List[WorklogDailyRe
                 if frames_val > 0:
                     sf = _parse_int(start_row[c_i]) if (start_row is not None and c_i < len(start_row)) else None
                     ef = _parse_int(end_row[c_i]) if (end_row is not None and c_i < len(end_row)) else None
-                    block_records.append(WorklogBlockRecord(
+                    target_blocks = rev_blocks if ann_key in FIRST_REVIEWER_KEYS else block_records
+                    target_blocks.append(WorklogBlockRecord(
                         annotator_key=ann_key,
                         annotator_display=ann_disp,
                         sheet_name=sname,
@@ -582,10 +611,13 @@ def parse_worklog(xlsx_path: str, progress_cb=None) -> Tuple[List[WorklogDailyRe
                         job_name=job_name_str,
                     ))
 
-        daily_records.extend(agg.values())
+        if ann_key in FIRST_REVIEWER_KEYS:
+            rev_daily.extend(agg.values())
+        else:
+            daily_records.extend(agg.values())
 
     wb.close()
-    return daily_records, block_records, note_records, warnings
+    return daily_records, block_records, note_records, warnings, rev_daily, rev_blocks, rev_notes
 
 
 def parse_rework(xlsx_path: str, progress_cb=None) -> Tuple[List[ReworkRecord], List[str]]:
@@ -819,8 +851,8 @@ def _parse_dist_assignees(raw_val) -> Tuple[str, Tuple[str, ...]]:
     parts = re.split(r"[/,;+&\n]+", cleaned)
     keys: List[str] = []
     for p in parts:
-        # Remove standalone trailing numbers/ranges if any
-        p_txt = re.sub(r"\b\d+\s*[-~–—]?\s*\d*\b", " ", p).strip()
+        # Remove standalone trailing numbers/ranges if any (keep digits glued to a name, e.g. 'Hien.03' -> HIEN03)
+        p_txt = re.sub(r"(?<![A-Za-z0-9._])\d+\s*[-~–—]?\s*\d*\b", " ", p).strip()
         k = normalize_annotator_key(p_txt)
         if k and k not in keys:
             keys.append(k)
@@ -871,6 +903,7 @@ def parse_distribution(xlsx_path: str, progress_cb=None) -> Tuple[List[Distribut
         col_url = 1
         col_frame = 2
         col_name = 3
+        col_insp: Optional[int] = None
         for r_i, r in enumerate(grid[:20]):
             norm = [re.sub(r"\s+", " ", str(v).strip().upper()) if v is not None else "" for v in r]
             url_i = next((i for i, h in enumerate(norm) if "JOB URL" in h or "JOB_URL" in h or h == "URL" or "JOB(URL)" in h), None)
@@ -896,6 +929,14 @@ def parse_distribution(xlsx_path: str, progress_cb=None) -> Tuple[List[Distribut
                     None,
                 )
                 col_name = nm_i if nm_i is not None else (col_frame + 1)
+                ins_i = next(
+                    (
+                        i for i, h in enumerate(norm)
+                        if i > col_name and ("INSP" in h or "INPECT" in h or "REVIEW" in h)
+                    ),
+                    None,
+                )
+                col_insp = ins_i
                 break
 
         if hdr_idx is None:
@@ -932,6 +973,8 @@ def parse_distribution(xlsx_path: str, progress_cb=None) -> Tuple[List[Distribut
             tk_s = str(raw_tk).strip() if raw_tk is not None else ""
             tk_key = normalize_job_name(tk_s)
             assignee_raw, assignee_keys = _parse_dist_assignees(raw_nm)
+            raw_ins = r[col_insp] if (col_insp is not None and col_insp < len(r)) else None
+            reviewer_raw, reviewer_keys = _parse_dist_assignees(raw_ins)
 
             seg_key = (tk_key, jid, sf, ef)
             if seg_key not in seg_map:
@@ -947,6 +990,8 @@ def parse_distribution(xlsx_path: str, progress_cb=None) -> Tuple[List[Distribut
                     assignee_raw=assignee_raw,
                     assignee_keys=assignee_keys,
                     cvat_task_id=_extract_cvat_task_id(url_s),
+                    reviewer_raw=reviewer_raw,
+                    reviewer_keys=reviewer_keys,
                 )
                 seg_map[seg_key] = rec
                 records.append(rec)
@@ -961,6 +1006,16 @@ def parse_distribution(xlsx_path: str, progress_cb=None) -> Tuple[List[Distribut
                 if assignee_raw and assignee_raw not in rec.assignee_raw:
                     rec.assignee_raw = (
                         f"{rec.assignee_raw}; {assignee_raw}" if rec.assignee_raw else assignee_raw
+                    )
+                if reviewer_keys:
+                    merged_rk = list(rec.reviewer_keys)
+                    for k in reviewer_keys:
+                        if k not in merged_rk:
+                            merged_rk.append(k)
+                    rec.reviewer_keys = tuple(merged_rk)
+                if reviewer_raw and reviewer_raw not in rec.reviewer_raw:
+                    rec.reviewer_raw = (
+                        f"{rec.reviewer_raw}; {reviewer_raw}" if rec.reviewer_raw else reviewer_raw
                     )
 
     wb.close()
@@ -980,10 +1035,13 @@ def load_dataset(
     )
 
     if worklog_path:
-        wl_daily, wl_blocks, wl_notes, wl_warn = parse_worklog(worklog_path, progress_cb=progress_cb)
+        wl_daily, wl_blocks, wl_notes, wl_warn, rev_daily, rev_blocks, rev_notes = parse_worklog(worklog_path, progress_cb=progress_cb)
         ds.worklog_daily = wl_daily
         ds.worklog_blocks = wl_blocks
         ds.worklog_notes = wl_notes
+        ds.reviewer_worklog_daily = rev_daily
+        ds.reviewer_worklog_blocks = rev_blocks
+        ds.reviewer_worklog_notes = rev_notes
         ds.warnings.extend(wl_warn)
 
     if rework_path:
@@ -1336,6 +1394,102 @@ class InspectorSummary:
 
 
 @dataclass
+class ReviewerDiffRecord:
+    date: datetime.date
+    rw_date: Optional[datetime.date]
+    inspector_key: str
+    inspector: str
+    annotator: str
+    task: str
+    job_id: str = ""
+    wl_range: str = ""
+    rw_range: str = ""
+    ann_range: str = ""
+    wl_frames: float = 0.0
+    rw_frames: float = 0.0
+    ann_frames: float = 0.0
+    wl_bbox: float = 0.0
+    rw_bbox: float = 0.0
+    ann_bbox: float = 0.0
+    wl_cells: str = ""
+    rw_rows: str = ""
+    ann_cells: str = ""
+    reason: str = ""
+    kind: str = "mismatch"  # "mismatch" or "pending_rework"
+
+    @property
+    def is_pending(self) -> bool:
+        return self.kind == "pending_rework"
+
+    @property
+    def frame_range_display(self) -> str:
+        parts = []
+        if self.wl_range:
+            parts.append(f"WL Rev:{self.wl_range}")
+        if self.rw_range and self.rw_range != self.wl_range:
+            parts.append(f"RW:{self.rw_range}")
+        if self.ann_range and self.ann_range != self.wl_range:
+            parts.append(f"Ann:{self.ann_range}")
+        return " | ".join(parts) if parts else "—"
+
+
+@dataclass
+class ReviewerAuditSummaryRow:
+    task: str
+    inspector_key: str
+    inspector: str
+    wl_frames: float = 0.0
+    rw_frames: float = 0.0
+    wl_bbox: float = 0.0
+    rw_bbox: float = 0.0
+    wl_time: float = 0.0
+    rw_time: float = 0.0
+    ann_frames: float = 0.0
+    ann_bbox: float = 0.0
+    note_count: int = 0
+    daily_diffs: List[ReviewerDiffRecord] = field(default_factory=list)
+
+    @property
+    def diff_frame(self) -> float:
+        return self.wl_frames - self.rw_frames
+
+    @property
+    def diff_bbox(self) -> float:
+        return self.wl_bbox - self.rw_bbox
+
+    @property
+    def diff_time(self) -> float:
+        return self.wl_time - self.rw_time
+
+    @property
+    def real_diffs(self) -> List[ReviewerDiffRecord]:
+        return [d for d in self.daily_diffs if d.kind == "mismatch"]
+
+    @property
+    def pending_diffs(self) -> List[ReviewerDiffRecord]:
+        return [d for d in self.daily_diffs if d.kind == "pending_rework"]
+
+    @property
+    def status_kind(self) -> str:
+        if self.real_diffs:
+            return "mismatch"
+        if self.pending_diffs:
+            return "pending"
+        return "ok"
+
+    @property
+    def status_dates_summary(self) -> str:
+        parts = []
+        m_dates = sorted({d.date for d in self.real_diffs})
+        p_dates = sorted({d.date for d in self.pending_diffs})
+        if m_dates:
+            parts.append("Lệch: " + ", ".join(d.strftime("%m/%d") for d in m_dates))
+        if p_dates:
+            parts.append("Chưa có Review: " + ", ".join(d.strftime("%m/%d") for d in p_dates))
+        return " | ".join(parts)
+
+
+@dataclass
 class ReportResult:
     start_date: datetime.date
     end_date: datetime.date
@@ -1347,6 +1501,9 @@ class ReportResult:
     filtered_notes: List[WorklogNoteRecord]
     daily_diffs: List[DailyDiffRecord] = field(default_factory=list)
     inspector_groups: List[InspectorSummary] = field(default_factory=list)
+    reviewer_audit_rows: List[ReviewerAuditSummaryRow] = field(default_factory=list)
+    reviewer_daily_diffs: List[ReviewerDiffRecord] = field(default_factory=list)
+    reviewer_notes: List[WorklogNoteRecord] = field(default_factory=list)
 
 
 def _classify_daily_diff(wl_fr: float, rw_fr: float, wl_bb: float, rw_bb: float) -> Tuple[str, str]:
@@ -1916,12 +2073,432 @@ def _match_blocks_with_frame_ranges(
     return diffs_by_ann_task, rw_agg_all, matched_rw_records
 
 
+def _build_reviewer_audit(
+    ds: LoadedDataset,
+    start_date: datetime.date,
+    end_date: datetime.date,
+    selected_tasks: Optional[set] = None,
+) -> Tuple[List[ReviewerAuditSummaryRow], List[ReviewerDiffRecord], List[WorklogNoteRecord]]:
+    """Cross-check Reviewer Work Log vs Inspection & Rework, Annotator Work Log, and Distribution Sheet."""
+    wl_agg = defaultdict(lambda: [0.0, 0.0, 0.0])  # (insp_key, base_task) -> [frames, bbox, time]
+    for r in ds.reviewer_worklog_daily:
+        if not (start_date <= r.date <= end_date):
+            continue
+        base_task = strip_rew_suffix(r.task)
+        if selected_tasks is not None and base_task not in selected_tasks and r.task not in selected_tasks:
+            continue
+        if r.frames == 0 and r.bbox == 0 and r.work_time == 0:
+            continue
+        k = (r.annotator_key, base_task)
+        wl_agg[k][0] += r.frames
+        wl_agg[k][1] += r.bbox
+        wl_agg[k][2] += r.work_time
+
+    rw_agg = defaultdict(lambda: [0.0, 0.0, 0.0])  # (insp_key, base_task) -> [frames, bbox, time]
+    rw_by_it = defaultdict(list)
+    for rec in ds.rework_records:
+        insp_key = normalize_annotator_key(rec.inspector)
+        if insp_key not in FIRST_REVIEWER_KEYS:
+            continue
+        dt = rec.date_inspect or rec.date_work
+        if dt is None or not (start_date <= dt <= end_date):
+            continue
+        base_task = strip_rew_suffix(rec.task)
+        if selected_tasks is not None and base_task not in selected_tasks and rec.task not in selected_tasks:
+            continue
+        if rec.frames == 0 and rec.bbox == 0 and rec.work_time == 0:
+            continue
+        rw_by_it[(insp_key, base_task)].append(rec)
+
+    # Index all Rework rows & Reviewer WL blocks (across ALL dates for cross-date matching) & Annotator WL blocks
+    rw_all_by_it = defaultdict(list)
+    for rec in ds.rework_records:
+        insp_key = normalize_annotator_key(rec.inspector)
+        if insp_key not in FIRST_REVIEWER_KEYS:
+            continue
+        rw_all_by_it[(insp_key, strip_rew_suffix(rec.task))].append(rec)
+
+    rev_all_by_it = defaultdict(list)
+    for wb in ds.reviewer_worklog_blocks:
+        rev_all_by_it[(wb.annotator_key, strip_rew_suffix(wb.task))].append(wb)
+
+    ann_blocks_by_task = defaultdict(list)
+    for ab in ds.worklog_blocks:
+        ann_blocks_by_task[strip_rew_suffix(ab.task)].append(ab)
+
+    # Distribution segments indexed per TASK (each sheet = 1 mode; TASK NAME = 1 CVAT task).
+    # Job IDs can repeat across sheets/servers, so ALWAYS scope lookups to the same task first.
+    dist_by_tn: Dict[str, List[DistributionJobRecord]] = defaultdict(list)
+    dist_by_sheet: Dict[str, List[DistributionJobRecord]] = defaultdict(list)
+    for dj in ds.distribution_jobs:
+        if dj.task_name_key:
+            dist_by_tn[dj.task_name_key].append(dj)
+        dist_by_sheet[str(dj.sheet_name).strip().upper()].append(dj)
+
+    def _dist_task_segments(wb_blk: WorklogBlockRecord, base_task: str) -> List[DistributionJobRecord]:
+        # 1. Prefer resolving by recorded Job ID inside the same mode sheet (prevents false alarms when col E Job Name is stale/copied)
+        sheet_segs = dist_by_sheet.get(base_task, [])
+        if wb_blk.job_id and sheet_segs:
+            same_id = [s for s in sheet_segs if s.job_id == wb_blk.job_id]
+            if same_id:
+                ctid = same_id[0].cvat_task_id
+                tkey = same_id[0].task_name_key
+                return [s for s in sheet_segs if (ctid and s.cvat_task_id == ctid) or (not ctid and s.task_name_key == tkey)]
+        # 2. Fallback: resolve by Job/Task Name
+        tn = normalize_job_name(wb_blk.job_name)
+        if tn and tn in dist_by_tn:
+            return dist_by_tn[tn]
+        if tn:
+            for pfx in ("OD_", "PFE_", "SSEG_", "ANPR_", "PPE_", "DPM_"):
+                if tn.startswith(pfx) and tn[len(pfx):] in dist_by_tn:
+                    return dist_by_tn[tn[len(pfx):]]
+            hits = [k for k in dist_by_tn if k in tn or tn in k]
+            if len(hits) == 1:
+                return dist_by_tn[hits[0]]
+        return []
+
+    def _seg_range(segs: List[DistributionJobRecord]) -> str:
+        return f"{min(s.start_frame for s in segs)}~{max(s.end_frame for s in segs)}"
+
+    def _check_reviewer_dist(
+        wb_blk: WorklogBlockRecord, base_task: str, ann_keys: set
+    ) -> List[str]:
+        if not ds.distribution_jobs or wb_blk.start_frame is None or wb_blk.end_frame is None:
+            return []
+        segs = _dist_task_segments(wb_blk, base_task)
+        if not segs:
+            return []
+        sf, ef = min(wb_blk.start_frame, wb_blk.end_frame), max(wb_blk.start_frame, wb_blk.end_frame)
+        task_lbl = segs[0].task_name or base_task
+        rec_segs = [s for s in segs if wb_blk.job_id and s.job_id == wb_blk.job_id]
+        # Segments (rows) in this task that physically contain the frames
+        owner_segs = [s for s in segs if s.start_frame <= sf <= s.end_frame]
+        owner_segs.sort(key=lambda s: (
+            0 if s.job_id == wb_blk.job_id else 1,
+            0 if (ann_keys and set(s.assignee_keys) & ann_keys) else 1,
+        ))
+        owner = owner_segs[0] if owner_segs else None
+
+        issues: List[str] = []
+        id_ok = bool(rec_segs) and any(s.start_frame <= sf <= s.end_frame for s in rec_segs) and any(
+            s.start_frame <= ef <= s.end_frame for s in rec_segs
+        )
+        frame_wrong = False
+        if not id_ok:
+            rec_is_ann = bool(ann_keys) and any(set(s.assignee_keys) & ann_keys for s in rec_segs)
+            frm_is_ann = owner is not None and bool(ann_keys) and bool(set(owner.assignee_keys) & ann_keys)
+            if rec_segs and rec_is_ann and not frm_is_ann:
+                # Job ID belongs to the annotator -> ID right, Start/End frame typed wrong
+                frame_wrong = True
+                ann_lbl = next((s.assignee_raw for s in rec_segs if set(s.assignee_keys) & ann_keys), "")
+                issues.append(
+                    f"Sai Frame WL Reviewer: Job {wb_blk.job_id} ({_seg_range(rec_segs)}) của {ann_lbl} đúng, "
+                    f"nhưng ghi frame {sf}~{ef}"
+                    + (f" (thuộc Job {owner.job_id})" if owner is not None else "")
+                    + f" [{task_lbl}]"
+                )
+            elif owner is not None and owner.job_id != wb_blk.job_id:
+                rec_txt = f"{wb_blk.job_id} ({_seg_range(rec_segs)})" if rec_segs else f"{wb_blk.job_id or '(trống)'} (không có trong task)"
+                issues.append(
+                    f"Sai ID Job WL Reviewer: ghi {rec_txt}, frame {sf}~{ef} thuộc Job {owner.job_id} "
+                    f"({owner.start_frame}~{owner.end_frame}) [{task_lbl}]"
+                )
+            elif rec_segs:
+                frame_wrong = True
+                issues.append(
+                    f"Sai Frame WL Reviewer: Job {wb_blk.job_id} có frame {_seg_range(rec_segs)}, đang ghi {sf}~{ef} [{task_lbl}]"
+                )
+            elif owner is None:
+                issues.append(f"Frame {sf}~{ef} không thuộc Job nào trong task [{task_lbl}]")
+        elif wb_blk.job_name and task_lbl:
+            # Job ID & Frame match Distribution, verify Task Name matches too
+            wb_tn = _clean_tn(wb_blk.job_name)
+            dist_tn = _clean_tn(task_lbl)
+            wb_tn_nopfx = wb_tn
+            for pfx in ("OD_", "PFE_", "SSEG_", "ANPR_", "PPE_", "DPM_"):
+                if wb_tn_nopfx.startswith(pfx):
+                    wb_tn_nopfx = wb_tn_nopfx[len(pfx):]
+                    break
+            if wb_tn and dist_tn and wb_tn != dist_tn and wb_tn_nopfx != dist_tn and dist_tn not in wb_tn and wb_tn not in dist_tn:
+                raw_first = str(wb_blk.job_name).splitlines()[0].strip()
+                issues.append(
+                    f"Sai Task Name WL Reviewer: ghi '{raw_first}', đúng là '{task_lbl}' (Job {wb_blk.job_id})"
+                )
+
+        return issues
+
+    def _clean_tn(s: str) -> str:
+        first = str(s or "").split("\n")[0]
+        first = re.sub(r"\([^)]*\)", "", first)
+        return normalize_job_name(first)
+
+    def _tiered_match(wb_blk: WorklogBlockRecord, cands: list, get_tn, used_ids: Optional[set] = None, single: bool = False):
+        """
+        Match a Reviewer WL block against candidates (Rework rows or Annotator WL blocks), in priority order:
+          1. Exact Start/End + same Job ID
+          2. Exact Start/End + same task name (or Job ID missing / task name unknown)
+          3. Overlapping frames + same Job ID
+          4. Same Job ID + same frame count (Start/End typo, e.g. 23000 instead of 33000)
+          5. Overlapping frames + same task name
+        Returns (matched_list, tier).
+        """
+        sf, ef = wb_blk.start_frame, wb_blk.end_frame
+        wid = wb_blk.job_id
+        wtn = _clean_tn(wb_blk.job_name)
+
+        def same_id(c) -> bool:
+            return bool(wid and c.job_id and c.job_id == wid)
+
+        def same_tn(c) -> bool:
+            t = get_tn(c)
+            return bool(wtn and t and t == wtn)
+
+        def tn_unknown(c) -> bool:
+            t = get_tn(c)
+            return not wtn or not t or not wid or not c.job_id
+
+        def has_rng(c) -> bool:
+            return c.start_frame is not None and c.end_frame is not None
+
+        def pick(lst):
+            if not single or len(lst) <= 1:
+                return lst
+            return [min(lst, key=lambda c: (
+                1 if (used_ids is not None and id(c) in used_ids) else 0,
+                abs(((getattr(c, "date_inspect", None) or getattr(c, "date_work", None) or getattr(c, "date", None) or wb_blk.date) - wb_blk.date).days),
+            ))]
+
+        if sf is None or ef is None:
+            if wid:
+                return pick([c for c in cands if same_id(c) and (used_ids is None or id(c) not in used_ids)]), 4
+            return [], 0
+        exact = [c for c in cands if c.start_frame == sf and c.end_frame == ef]
+        t1 = [c for c in exact if same_id(c)]
+        if t1:
+            return pick(t1), 1
+        t2 = [c for c in exact if same_tn(c) or tn_unknown(c)]
+        if t2:
+            return pick(t2), 2
+        t3 = [c for c in cands if has_rng(c) and same_id(c) and max(sf, c.start_frame) <= min(ef, c.end_frame)]
+        if t3:
+            return t3, 3
+        t4 = [
+            c for c in cands
+            if same_id(c) and abs(c.frames - wb_blk.frames) <= 1e-6
+            and (used_ids is None or id(c) not in used_ids)
+        ]
+        if t4:
+            return [min(t4, key=lambda c: abs(((getattr(c, "date_inspect", None) or getattr(c, "date_work", None) or getattr(c, "date", None) or wb_blk.date) - wb_blk.date).days))], 4
+        t5 = [c for c in cands if has_rng(c) and same_tn(c) and max(sf, c.start_frame) <= min(ef, c.end_frame)]
+        if t5:
+            return t5, 5
+        return [], 0
+
+    note_counts = defaultdict(int)
+    rev_notes: List[WorklogNoteRecord] = []
+    for n in ds.reviewer_worklog_notes:
+        if not (start_date <= n.date <= end_date):
+            continue
+        base_task = strip_rew_suffix(n.task)
+        if selected_tasks is not None and base_task not in selected_tasks and n.task not in selected_tasks:
+            continue
+        note_counts[(n.annotator_key, base_task)] += 1
+        rev_notes.append(n)
+    rev_notes.sort(key=lambda x: (x.annotator_display, x.date, x.task))
+
+    diffs_by_it = defaultdict(list)
+    matched_rw_ids = set()
+
+    for wb in ds.reviewer_worklog_blocks:
+        if not (start_date <= wb.date <= end_date):
+            continue
+        base_task = strip_rew_suffix(wb.task)
+        if selected_tasks is not None and base_task not in selected_tasks and wb.task not in selected_tasks:
+            continue
+        it_key = (wb.annotator_key, base_task)
+        insp_disp = wb.annotator_display
+        wl_rng = _fmt_range(wb.start_frame, wb.end_frame)
+        wl_loc = f"{wb.sheet_name}!{wb.cell_ref}"
+
+        # Match against Inspection & Rework (same Reviewer + mode, across ALL dates)
+        rw_cands = rw_all_by_it.get(it_key, [])
+        matched_rws, rw_tier = _tiered_match(wb, rw_cands, lambda c: "", used_ids=matched_rw_ids, single=True)
+
+        for m in matched_rws:
+            if id(m) not in matched_rw_ids:
+                matched_rw_ids.add(id(m))
+                rw_agg[it_key][0] += m.frames
+                rw_agg[it_key][1] += m.bbox
+                rw_agg[it_key][2] += m.work_time
+
+        # Match against Annotator Work Log (same mode, across ALL dates; scoped by Job ID / task name)
+        ann_cands = ann_blocks_by_task.get(base_task, [])
+        matched_anns, ann_tier = _tiered_match(wb, ann_cands, lambda a: _clean_tn(a.job_name))
+
+        rw_fr = sum(c.frames for c in matched_rws)
+        rw_bb = sum(c.bbox for c in matched_rws)
+        rw_dt = min((c.date_inspect or c.date_work for c in matched_rws if (c.date_inspect or c.date_work)), default=None)
+        rw_rng = _fmt_range(
+            min((c.start_frame for c in matched_rws if c.start_frame is not None), default=None),
+            max((c.end_frame for c in matched_rws if c.end_frame is not None), default=None),
+        ) if matched_rws else ""
+        ann_fr = sum(a.frames for a in matched_anns)
+        ann_bb = sum(a.bbox for a in matched_anns)
+        ann_rng = _fmt_range(
+            min((a.start_frame for a in matched_anns if a.start_frame is not None), default=None),
+            max((a.end_frame for a in matched_anns if a.end_frame is not None), default=None),
+        ) if matched_anns else ""
+        ann_name = ", ".join(sorted({a.annotator_display for a in matched_anns})) if matched_anns else (
+            ", ".join(sorted({c.worker_display for c in matched_rws})) if matched_rws else "—"
+        )
+
+        reasons: List[str] = []
+        kind = "ok"
+        if not matched_rws:
+            kind = "pending_rework"
+            reasons.append("Chưa có data bên Review")
+        else:
+            if wl_rng and rw_rng and wl_rng != rw_rng:
+                kind = "mismatch"
+                reasons.append(f"Lệch Start/End vs Review ({wl_rng} ≠ {rw_rng})")
+            if abs(wb.frames - rw_fr) > 1e-6:
+                kind = "mismatch"
+                reasons.append(f"Lệch Frame vs Review ({int(wb.frames)} ≠ {int(rw_fr)})")
+            if wb.bbox > 0 and rw_bb > 0 and abs(wb.bbox - rw_bb) > 1e-6:
+                kind = "mismatch"
+                reasons.append(f"Lệch BBOX vs Review ({int(wb.bbox)} ≠ {int(rw_bb)})")
+
+        if matched_anns:
+            if wl_rng and ann_rng and wl_rng != ann_rng and ann_tier == 4:
+                kind = "mismatch"
+                reasons.append(f"Lệch Start/End vs WL Annotator ({wl_rng} ≠ {ann_rng})")
+            if abs(wb.frames - ann_fr) > 1e-6:
+                kind = "mismatch"
+                reasons.append(f"Lệch Frame vs WL Annotator ({int(wb.frames)} ≠ {int(ann_fr)})")
+            if wb.bbox > 0 and ann_bb > 0 and abs(wb.bbox - ann_bb) > 1e-6:
+                kind = "mismatch"
+                reasons.append(f"Lệch BBOX vs WL Annotator ({int(wb.bbox)} ≠ {int(ann_bb)})")
+        elif wb.start_frame is not None and wb.end_frame is not None:
+            if kind == "ok":
+                kind = "mismatch"
+            reasons.append("Không tìm thấy block tương ứng ở WL Annotator")
+
+        ann_keys = {a.annotator_key for a in matched_anns} | {c.worker_key for c in matched_rws}
+        dist_issues = _check_reviewer_dist(wb, base_task, ann_keys)
+        if dist_issues:
+            kind = "mismatch"
+            reasons.extend(dist_issues)
+
+        if kind != "ok":
+            diffs_by_it[it_key].append(ReviewerDiffRecord(
+                date=wb.date,
+                rw_date=rw_dt,
+                inspector_key=wb.annotator_key,
+                inspector=insp_disp,
+                annotator=ann_name,
+                task=base_task,
+                job_id=wb.job_id or (matched_rws[0].job_id if matched_rws else ""),
+                wl_range=wl_rng,
+                rw_range=rw_rng,
+                ann_range=ann_rng,
+                wl_frames=wb.frames,
+                rw_frames=rw_fr,
+                ann_frames=ann_fr,
+                wl_bbox=wb.bbox,
+                rw_bbox=rw_bb,
+                ann_bbox=ann_bb,
+                wl_cells=wl_loc,
+                rw_rows=_format_rw_locs(matched_rws),
+                ann_cells=", ".join(f"{a.sheet_name}!{a.cell_ref}" for a in matched_anns),
+                reason=" | ".join(reasons),
+                kind=kind,
+            ))
+
+    # Rework rows in period NOT matched by any Reviewer Work Log block (check across ALL dates before flagging!)
+    for it_key, rlist in rw_by_it.items():
+        insp_key, base_task = it_key
+        rev_cands = rev_all_by_it.get(it_key, [])
+        for rec in rlist:
+            if id(rec) in matched_rw_ids:
+                continue
+            dt = rec.date_inspect or rec.date_work
+            if dt is None:
+                continue
+            # Check if a matching Reviewer Work Log block exists on ANY date (handles date lag)
+            has_any_wl_match = False
+            if rec.start_frame is not None and rec.end_frame is not None:
+                for wb_any in rev_cands:
+                    if wb_any.start_frame is not None and wb_any.end_frame is not None:
+                        if max(rec.start_frame, wb_any.start_frame) <= min(rec.end_frame, wb_any.end_frame):
+                            if not rec.job_id or not wb_any.job_id or rec.job_id == wb_any.job_id:
+                                has_any_wl_match = True
+                                break
+            elif rec.job_id:
+                has_any_wl_match = any(wb_any.job_id == rec.job_id for wb_any in rev_cands)
+
+            if has_any_wl_match:
+                continue
+
+            diffs_by_it[it_key].append(ReviewerDiffRecord(
+                date=dt,
+                rw_date=dt,
+                inspector_key=insp_key,
+                inspector=display_annotator_name(insp_key),
+                annotator=rec.worker_display,
+                task=base_task,
+                job_id=rec.job_id,
+                wl_range="",
+                rw_range=_fmt_range(rec.start_frame, rec.end_frame),
+                ann_range="",
+                wl_frames=0.0,
+                rw_frames=rec.frames,
+                ann_frames=0.0,
+                wl_bbox=0.0,
+                rw_bbox=rec.bbox,
+                ann_bbox=0.0,
+                wl_cells="",
+                rw_rows=_format_rw_locs([rec]),
+                ann_cells="",
+                reason="Có bên Review nhưng chưa ghi Work Log Reviewer",
+                kind="pending_rework",
+            ))
+
+    summary_rows: List[ReviewerAuditSummaryRow] = []
+    all_keys = set(wl_agg.keys()) | set(rw_agg.keys())
+    for insp_key, base_task in sorted(all_keys, key=lambda kv: (kv[1], display_annotator_name(kv[0]))):
+        wl_fr, wl_bb, wl_tm = wl_agg.get((insp_key, base_task), (0.0, 0.0, 0.0))
+        rw_fr, rw_bb, rw_tm = rw_agg.get((insp_key, base_task), (0.0, 0.0, 0.0))
+        if wl_fr == 0 and wl_bb == 0 and wl_tm == 0 and rw_fr == 0 and rw_bb == 0 and rw_tm == 0:
+            continue
+        it_diffs = sorted(diffs_by_it.get((insp_key, base_task), []), key=lambda d: d.date)
+        summary_rows.append(ReviewerAuditSummaryRow(
+            task=base_task,
+            inspector_key=insp_key,
+            inspector=display_annotator_name(insp_key),
+            wl_frames=wl_fr,
+            rw_frames=rw_fr,
+            wl_bbox=wl_bb,
+            rw_bbox=rw_bb,
+            wl_time=wl_tm,
+            rw_time=rw_tm,
+            note_count=note_counts.get((insp_key, base_task), 0),
+            daily_diffs=it_diffs,
+        ))
+
+    all_rev_diffs: List[ReviewerDiffRecord] = []
+    for r in summary_rows:
+        all_rev_diffs.extend(r.daily_diffs)
+    all_rev_diffs.sort(key=lambda d: (0 if d.kind == "mismatch" else 1, d.inspector.upper(), d.date, d.task))
+
+    return summary_rows, all_rev_diffs, rev_notes
+
+
 def build_report(
     ds: LoadedDataset,
     start_date: datetime.date,
     end_date: datetime.date,
     selected_annotators: Optional[set] = None,  # set of annotator_keys, None = all
-    selected_tasks: Optional[set] = None,       # set of task strings for Template 1 / Audit, None = all
+    selected_tasks: Optional[set] = None,       # set of task strings for all report views (Task/Annotator/Reviewer/Xep_Hang/Audit), None = all
     source_mode: str = "rework",                # "rework" or "worklog"
     rework_date_mode: str = "col_v",            # legacy parameter (ignored; matched by Job ID + Frame Start/End)
 ) -> ReportResult:
@@ -2026,9 +2603,9 @@ def build_report(
             total_err_second_bbox=sum(r.err_second_bbox for r in t_rows),
         ))
 
-    # Build Template 2: ALWAYS grand total across ALL tasks per Annotator/Reviewer (Workers A-Z, then 1st Reviewers A-Z)
+    # Build Template 2: Grand total across selected tasks per Annotator/Reviewer (Workers A-Z, then 1st Reviewers A-Z)
     by_ann = defaultdict(list)
-    for row in unfiltered_task_rows:
+    for row in all_rows:
         by_ann[row.annotator_key].append(row)
 
     annotator_rows: List[AggregatedRow] = []
@@ -2112,6 +2689,10 @@ def build_report(
             total_err_second_bbox=sum(r.err_second_bbox for r in i_rows),
         ))
 
+    rev_audit_rows, rev_daily_diffs, rev_notes = _build_reviewer_audit(
+        ds, start_date, end_date, selected_tasks=selected_tasks
+    )
+
     return ReportResult(
         start_date=start_date,
         end_date=end_date,
@@ -2123,4 +2704,7 @@ def build_report(
         filtered_notes=filtered_notes,
         daily_diffs=filtered_daily_diffs,
         inspector_groups=inspector_groups,
+        reviewer_audit_rows=rev_audit_rows,
+        reviewer_daily_diffs=rev_daily_diffs,
+        reviewer_notes=rev_notes,
     )
