@@ -105,6 +105,13 @@ def normalize_task(task: str) -> str:
     return str(task).strip().upper()
 
 
+def normalize_job_name(name: str) -> str:
+    """Normalize Task/Job Name (e.g. 'HOPJT_#2', 'OD_HOPJT_vid_1') for matching against Distribution Sheet."""
+    if not name:
+        return ""
+    return re.sub(r"\s+", "", str(name).strip().upper())
+
+
 def to_date(val) -> Optional[datetime.date]:
     if isinstance(val, datetime.datetime):
         return val.date()
@@ -238,6 +245,13 @@ def _extract_job_id(url: str) -> str:
     return m.group(1) if m else ""
 
 
+def _extract_cvat_task_id(url: str) -> str:
+    if not url:
+        return ""
+    m = re.search(r"/tasks/(\d+)", str(url))
+    return m.group(1) if m else ""
+
+
 def _fmt_range(sf: Optional[int], ef: Optional[int]) -> str:
     if sf is not None and ef is not None:
         return f"{sf}~{ef}"
@@ -261,6 +275,22 @@ class WorklogBlockRecord:
     frames: float
     bbox: int
     cell_ref: str
+    job_name: str = ""                         # Col E (Job / Task Name, e.g. 'HOPJT_#2', 'OD_HOPJT_vid_1')
+
+
+@dataclass
+class DistributionJobRecord:
+    sheet_name: str
+    row_num: int
+    task_name: str                             # Raw TASK NAME from distribution sheet (e.g. 'HOPJT_#2')
+    task_name_key: str                         # Normalized key (e.g. 'HOPJT_#2')
+    job_url: str                               # Full JOB URL (e.g. 'http://.../jobs/4410')
+    job_id: str                                # Trailing ID after /jobs/ (e.g. '4410')
+    start_frame: int
+    end_frame: int
+    assignee_raw: str = ""                     # Raw NAME column text (e.g. 'C.Linh (33050-)')
+    assignee_keys: Tuple[str, ...] = ()        # Normalized annotator keys (e.g. ('CLINH',))
+    cvat_task_id: str = ""                     # CVAT Task ID after /tasks/ (e.g. '735')
 
 
 @dataclass
@@ -304,10 +334,12 @@ class ReworkRecord:
 class LoadedDataset:
     worklog_path: str = ""
     rework_path: str = ""
+    distribution_path: str = ""
     worklog_daily: List[WorklogDailyRecord] = field(default_factory=list)
     worklog_blocks: List[WorklogBlockRecord] = field(default_factory=list)
     worklog_notes: List[WorklogNoteRecord] = field(default_factory=list)
     rework_records: List[ReworkRecord] = field(default_factory=list)
+    distribution_jobs: List[DistributionJobRecord] = field(default_factory=list)
     annotators: Dict[str, str] = field(default_factory=dict)  # key -> display name
     tasks: List[str] = field(default_factory=list)
     min_date: Optional[datetime.date] = None
@@ -485,7 +517,8 @@ def parse_worklog(xlsx_path: str, progress_cb=None) -> Tuple[List[WorklogDailyRe
             if mode.endswith("_REW") and ann_key not in FIRST_REVIEWER_KEYS:
                 continue
 
-            # Job ID (col F) and paired start_frame / end_frame sub-rows directly below r_i
+            # Job Name (col E), Job ID (col F) and paired start_frame / end_frame sub-rows directly below r_i
+            job_name_str = str(r[4]).strip() if (len(r) > 4 and r[4] is not None) else ""
             job_id_val = _parse_int(r[5]) if len(r) > 5 else None
             job_id_str = str(job_id_val) if job_id_val is not None else ""
             start_row, end_row = None, None
@@ -546,6 +579,7 @@ def parse_worklog(xlsx_path: str, progress_cb=None) -> Tuple[List[WorklogDailyRe
                         frames=frames_val,
                         bbox=bbox_val,
                         cell_ref=ref,
+                        job_name=job_name_str,
                     ))
 
         daily_records.extend(agg.values())
@@ -766,8 +800,184 @@ def _resolve_missing_rework_tasks(
         r.task = best_task or "UNKNOWN"
 
 
-def load_dataset(worklog_path: str, rework_path: str, progress_cb=None) -> LoadedDataset:
-    ds = LoadedDataset(worklog_path=worklog_path, rework_path=rework_path)
+def _parse_dist_assignees(raw_val) -> Tuple[str, Tuple[str, ...]]:
+    """
+    Parse annotator name(s) from Distribution Sheet NAME column.
+    Examples:
+      'C.Linh (33050-)'              -> ('C.Linh (33050-)', ('CLINH',))
+      'Nmai(32500-32744)'            -> ('Nmai(32500-32744)', ('NMAI',))
+      'Nmai(0-100) / C.Linh(101-200)' -> (..., ('NMAI', 'CLINH'))
+    """
+    if raw_val is None:
+        return "", ()
+    raw_str = str(raw_val).strip()
+    if not raw_str:
+        return "", ()
+    # Remove parenthetical frame hints like '(33050-)' or '(32500-32744)'
+    cleaned = re.sub(r"\([^)]*\)", " ", raw_str)
+    # Split multiple assignees separated by '/', ',', ';', '+', '&', newline
+    parts = re.split(r"[/,;+&\n]+", cleaned)
+    keys: List[str] = []
+    for p in parts:
+        # Remove standalone trailing numbers/ranges if any
+        p_txt = re.sub(r"\b\d+\s*[-~–—]?\s*\d*\b", " ", p).strip()
+        k = normalize_annotator_key(p_txt)
+        if k and k not in keys:
+            keys.append(k)
+    return raw_str, tuple(keys)
+
+
+def parse_distribution(xlsx_path: str, progress_cb=None) -> Tuple[List[DistributionJobRecord], List[str]]:
+    """
+    Parse distribution_sheet_<year>.xlsx across all sheets.
+    Uses actual Excel merged_cells ranges so vertically merged TASK NAME, JOB URL,
+    and Frame cells are resolved accurately even when intermediate NAME rows are blank.
+    """
+    records: List[DistributionJobRecord] = []
+    warnings: List[str] = []
+
+    if progress_cb:
+        progress_cb(92, "Đang đọc Distribution Sheet (check ID Job & Name)...")
+
+    wb = openpyxl.load_workbook(xlsx_path, read_only=False, data_only=True)
+    for sname in wb.sheetnames:
+        ws = wb[sname]
+        max_r = ws.max_row or 0
+        max_c = min(ws.max_column or 0, 20)
+        if max_r < 2 or max_c < 2:
+            continue
+
+        # Build exact value grid with merged cells expanded
+        grid: List[List[object]] = [
+            [ws.cell(r, c).value for c in range(1, max_c + 1)]
+            for r in range(1, max_r + 1)
+        ]
+        for rng in ws.merged_cells.ranges:
+            if rng.min_col > max_c:
+                continue
+            top_val = grid[rng.min_row - 1][rng.min_col - 1]
+            if top_val is None:
+                continue
+            end_r = min(rng.max_row, max_r)
+            end_c = min(rng.max_col, max_c)
+            for rr in range(rng.min_row - 1, end_r):
+                for cc in range(rng.min_col - 1, end_c):
+                    if grid[rr][cc] is None:
+                        grid[rr][cc] = top_val
+
+        # Dynamically locate header row containing JOB URL / URL and FRAME
+        hdr_idx = None
+        col_task = 0
+        col_url = 1
+        col_frame = 2
+        col_name = 3
+        for r_i, r in enumerate(grid[:20]):
+            norm = [re.sub(r"\s+", " ", str(v).strip().upper()) if v is not None else "" for v in r]
+            url_i = next((i for i, h in enumerate(norm) if "JOB URL" in h or "JOB_URL" in h or h == "URL" or "JOB(URL)" in h), None)
+            fr_i = next((i for i, h in enumerate(norm) if h == "FRAME" or h == "FRAMES" or "FRAME RANGE" in h), None)
+            if url_i is not None and fr_i is not None:
+                hdr_idx = r_i
+                col_url = url_i
+                col_frame = fr_i
+                tk_i = next((i for i, h in enumerate(norm) if "TASK NAME" in h or "TASK_NAME" in h or h == "TASK" or "JOB NAME" in h), None)
+                col_task = tk_i if tk_i is not None else max(0, url_i - 1)
+                nm_i = next(
+                    (
+                        i for i, h in enumerate(norm)
+                        if i not in (col_task, col_url, col_frame)
+                        and (
+                            h == "NAME"
+                            or "ANNOTATOR" in h
+                            or "WORKER" in h
+                            or "ASSIGNEE" in h
+                            or ("NAME" in h and "TASK" not in h and "JOB" not in h and "FILE" not in h)
+                        )
+                    ),
+                    None,
+                )
+                col_name = nm_i if nm_i is not None else (col_frame + 1)
+                break
+
+        if hdr_idx is None:
+            continue
+
+        # Aggregate rows by (task_name_key, job_id, sf, ef) so all sub-row assignees merge cleanly
+        seg_map: Dict[Tuple[str, str, int, int], DistributionJobRecord] = {}
+        for idx, r in enumerate(grid[hdr_idx + 1:], start=hdr_idx + 2):
+            raw_tk = r[col_task] if col_task < len(r) else None
+            raw_url = r[col_url] if col_url < len(r) else None
+            raw_fr = r[col_frame] if col_frame < len(r) else None
+            raw_nm = r[col_name] if col_name < len(r) else None
+
+            url_s = str(raw_url).strip() if raw_url is not None else ""
+            fr_s = str(raw_fr).strip() if raw_fr is not None else ""
+            if not url_s or not fr_s:
+                continue
+
+            jid = _extract_job_id(url_s)
+            if not jid:
+                m_tail = re.search(r"/(\d+)\s*$", url_s)
+                if m_tail:
+                    jid = m_tail.group(1)
+            if not jid:
+                continue
+
+            m_fr = re.search(r"(\d+)\s*[-~–—]\s*(\d+)", fr_s)
+            if not m_fr:
+                continue
+            sf, ef = int(m_fr.group(1)), int(m_fr.group(2))
+            if sf > ef:
+                sf, ef = ef, sf
+
+            tk_s = str(raw_tk).strip() if raw_tk is not None else ""
+            tk_key = normalize_job_name(tk_s)
+            assignee_raw, assignee_keys = _parse_dist_assignees(raw_nm)
+
+            seg_key = (tk_key, jid, sf, ef)
+            if seg_key not in seg_map:
+                rec = DistributionJobRecord(
+                    sheet_name=sname,
+                    row_num=idx,
+                    task_name=tk_s,
+                    task_name_key=tk_key,
+                    job_url=url_s,
+                    job_id=jid,
+                    start_frame=sf,
+                    end_frame=ef,
+                    assignee_raw=assignee_raw,
+                    assignee_keys=assignee_keys,
+                    cvat_task_id=_extract_cvat_task_id(url_s),
+                )
+                seg_map[seg_key] = rec
+                records.append(rec)
+            else:
+                rec = seg_map[seg_key]
+                if assignee_keys:
+                    merged_keys = list(rec.assignee_keys)
+                    for k in assignee_keys:
+                        if k not in merged_keys:
+                            merged_keys.append(k)
+                    rec.assignee_keys = tuple(merged_keys)
+                if assignee_raw and assignee_raw not in rec.assignee_raw:
+                    rec.assignee_raw = (
+                        f"{rec.assignee_raw}; {assignee_raw}" if rec.assignee_raw else assignee_raw
+                    )
+
+    wb.close()
+    return records, warnings
+
+
+def load_dataset(
+    worklog_path: str,
+    rework_path: str,
+    progress_cb=None,
+    distribution_path: str = "",
+) -> LoadedDataset:
+    ds = LoadedDataset(
+        worklog_path=worklog_path,
+        rework_path=rework_path,
+        distribution_path=distribution_path,
+    )
 
     if worklog_path:
         wl_daily, wl_blocks, wl_notes, wl_warn = parse_worklog(worklog_path, progress_cb=progress_cb)
@@ -780,6 +990,14 @@ def load_dataset(worklog_path: str, rework_path: str, progress_cb=None) -> Loade
         rw_recs, rw_warn = parse_rework(rework_path, progress_cb=progress_cb)
         ds.rework_records = rw_recs
         ds.warnings.extend(rw_warn)
+
+    if distribution_path and os.path.isfile(distribution_path):
+        try:
+            dist_jobs, dist_warn = parse_distribution(distribution_path, progress_cb=progress_cb)
+            ds.distribution_jobs = dist_jobs
+            ds.warnings.extend(dist_warn)
+        except Exception as exc:
+            ds.warnings.append(f"Không đọc được Distribution Sheet: {exc}")
 
     _resolve_missing_rework_tasks(ds.rework_records, ds.worklog_blocks)
 
@@ -868,6 +1086,21 @@ class DailyDiffRecord:
     @property
     def is_pending(self) -> bool:
         return self.kind == "pending_rework"
+
+    @property
+    def is_missing_bbox(self) -> bool:
+        return self.is_pending and (
+            (self.wl_bbox > 0 and self.rw_bbox <= 0 and self.rw_frames > 0)
+            or (self.rw_bbox > 0 and self.wl_bbox <= 0 and self.wl_frames > 0)
+        )
+
+    @property
+    def is_job_id_mismatch(self) -> bool:
+        return (not self.is_pending) and ("Sai ID Job" in self.reason or "Lệch ID Job" in self.reason)
+
+    @property
+    def is_dist_frame_mismatch(self) -> bool:
+        return (not self.is_pending) and ("Sai Frame " in self.reason)
 
     @property
     def frame_range_display(self) -> str:
@@ -985,8 +1218,12 @@ class AggregatedRow:
         parts = []
         if self.mismatch_dates:
             parts.append(f"Lệch: {self.mismatch_dates_str}")
-        if self.pending_dates:
-            parts.append(f"Chưa có Review: {self.pending_dates_str}")
+        no_rw_dates = sorted({d.date for d in self.pending_diffs if not d.is_missing_bbox})
+        miss_bb_dates = sorted({d.date for d in self.pending_diffs if d.is_missing_bbox})
+        if no_rw_dates:
+            parts.append("Chưa có Review: " + ", ".join(d.strftime("%m/%d") for d in no_rw_dates))
+        if miss_bb_dates:
+            parts.append("Chưa nhập BBOX: " + ", ".join(d.strftime("%m/%d") for d in miss_bb_dates))
         return " | ".join(parts)
 
     @property
@@ -1113,21 +1350,40 @@ class ReportResult:
 
 
 def _classify_daily_diff(wl_fr: float, rw_fr: float, wl_bb: float, rw_bb: float) -> Tuple[str, str]:
-    """Return (kind, reason) where kind is 'pending_rework' or 'mismatch'."""
+    """
+    Return (kind, reason) where kind is 'pending_rework', 'mismatch', or 'ok'.
+    BBOX is only considered mismatched when BOTH Work Log and Review have BBOX data (> 0)
+    and the values disagree. If either side has no BBOX entered (0 / blank), it is NOT a
+    BBOX error.
+    """
     has_wl = (wl_fr > 0 or wl_bb > 0)
     has_rw = (rw_fr > 0 or rw_bb > 0)
     if has_wl and not has_rw:
         return "pending_rework", "Chưa có data bên Review"
     if has_rw and not has_wl:
         return "mismatch", "Có ở Review, thiếu bên Work Log"
+
     diff_f = abs(wl_fr - rw_fr) > 1e-6
-    diff_b = abs(wl_bb - rw_bb) > 1e-6
+    has_wl_bb = wl_bb > 0
+    has_rw_bb = rw_bb > 0
+    diff_b = has_wl_bb and has_rw_bb and (abs(wl_bb - rw_bb) > 1e-6)
+    missing_rw_bb = has_wl_bb and not has_rw_bb
+    missing_wl_bb = has_rw_bb and not has_wl_bb
+
     if diff_f and diff_b:
         return "mismatch", "Lệch cả Frame & BBOX"
     if diff_f:
+        if missing_rw_bb:
+            return "mismatch", "Lệch Frame (chưa nhập BBOX bên Review)"
+        if missing_wl_bb:
+            return "mismatch", "Lệch Frame (chưa nhập BBOX bên Work Log)"
         return "mismatch", "Khớp BBOX, lệch Frame"
     if diff_b:
         return "mismatch", "Khớp Frame, lệch BBOX (kiểm tra Note)"
+    if missing_rw_bb:
+        return "pending_rework", "Chưa nhập BBOX bên Review"
+    if missing_wl_bb:
+        return "pending_rework", "Chưa nhập BBOX bên Work Log"
     return "ok", ""
 
 
@@ -1174,6 +1430,186 @@ def _match_blocks_with_frame_ranges(
                 rw_agg_all[key][4] += rec.err_first_bbox
                 rw_agg_all[key][5] += rec.err_second_bbox
 
+    # Index Distribution Sheet jobs by Job ID (merging multiple frame segments under the same Job ID),
+    # by CVAT Task ID (/tasks/<id>), and by normalized Task Name
+    dist_by_id: Dict[str, DistributionJobRecord] = {}
+    dist_by_cvat_task: Dict[str, List[DistributionJobRecord]] = defaultdict(list)
+    dist_by_task: Dict[str, List[DistributionJobRecord]] = defaultdict(list)
+    for dj in ds.distribution_jobs:
+        if dj.job_id in dist_by_id:
+            prev = dist_by_id[dj.job_id]
+            merged_keys = list(prev.assignee_keys)
+            for k in dj.assignee_keys:
+                if k not in merged_keys:
+                    merged_keys.append(k)
+            dist_by_id[dj.job_id] = DistributionJobRecord(
+                sheet_name=prev.sheet_name,
+                row_num=prev.row_num,
+                task_name=prev.task_name or dj.task_name,
+                task_name_key=prev.task_name_key or dj.task_name_key,
+                job_url=prev.job_url,
+                job_id=prev.job_id,
+                start_frame=min(prev.start_frame, dj.start_frame),
+                end_frame=max(prev.end_frame, dj.end_frame),
+                assignee_raw=prev.assignee_raw,
+                assignee_keys=tuple(merged_keys),
+                cvat_task_id=prev.cvat_task_id or dj.cvat_task_id,
+            )
+        else:
+            dist_by_id[dj.job_id] = dj
+        if dj.cvat_task_id:
+            dist_by_cvat_task[dj.cvat_task_id].append(dj)
+        if dj.task_name_key:
+            dist_by_task[dj.task_name_key].append(dj)
+
+    def _same_task_jobs_for(recorded_id: str, fallback_tn_key: str) -> List[DistributionJobRecord]:
+        """Return ONLY Distribution jobs belonging to the EXACT SAME Task (never cross-task!)."""
+        rec_dist = dist_by_id.get(recorded_id) if recorded_id else None
+        if rec_dist is not None:
+            if rec_dist.cvat_task_id and rec_dist.cvat_task_id in dist_by_cvat_task:
+                return dist_by_cvat_task[rec_dist.cvat_task_id]
+            if rec_dist.task_name_key and rec_dist.task_name_key in dist_by_task:
+                return dist_by_task[rec_dist.task_name_key]
+        if fallback_tn_key and fallback_tn_key in dist_by_task:
+            return dist_by_task[fallback_tn_key]
+        return []
+
+    def _find_frame_dist(
+        task_jobs: List[DistributionJobRecord],
+        recorded_id: str,
+        annotator_key: str,
+        sf: int,
+        ef: int,
+    ) -> Optional[DistributionJobRecord]:
+        if not task_jobs:
+            return None
+        hits = [d for d in task_jobs if d.start_frame <= sf and ef <= d.end_frame]
+        if not hits:
+            hits = [d for d in task_jobs if d.start_frame <= sf <= d.end_frame]
+        if not hits:
+            return None
+        return (
+            next((d for d in hits if d.job_id == recorded_id), None)
+            or next((d for d in hits if annotator_key and annotator_key in d.assignee_keys), None)
+            or hits[0]
+        )
+
+    def _resolve_dist_task_key(wb: WorklogBlockRecord, matched_rws: List[ReworkRecord]) -> str:
+        if not dist_by_task:
+            return ""
+        raw_k = normalize_job_name(wb.job_name)
+        if raw_k and raw_k in dist_by_task:
+            return raw_k
+        # Try stripping leading mode prefix (e.g. "OD_HOPJT_#2" -> "HOPJT_#2") or unique suffix match
+        if raw_k:
+            for pfx in ("OD_", "PFE_", "SSEG_", "ANPR_"):
+                if raw_k.startswith(pfx) and raw_k[len(pfx):] in dist_by_task:
+                    return raw_k[len(pfx):]
+            sub_hits = [k for k in dist_by_task if k in raw_k or raw_k in k]
+            if len(sub_hits) == 1:
+                return sub_hits[0]
+        # Fallback: infer Task Name from recorded Job ID in Work Log or Review
+        if wb.job_id and wb.job_id in dist_by_id:
+            return dist_by_id[wb.job_id].task_name_key
+        for rw in matched_rws:
+            if rw.job_id and rw.job_id in dist_by_id:
+                return dist_by_id[rw.job_id].task_name_key
+        return ""
+
+    def _diagnose_dist_mismatch(
+        side_label: str,
+        recorded_id: str,
+        annotator_key: str,
+        sf: int,
+        ef: int,
+        frame_dist: Optional[DistributionJobRecord],
+    ) -> str:
+        rec_dist = dist_by_id.get(recorded_id) if recorded_id else None
+
+        # If [sf, ef] is already inside the recorded Job ID's own Distribution frame range -> 100% VALID!
+        if rec_dist is not None and rec_dist.start_frame <= sf and ef <= rec_dist.end_frame:
+            return ""
+
+        # Case 1: Both recorded ID and frame range resolve to Distribution jobs (guaranteed SAME task!)
+        if rec_dist is not None and frame_dist is not None:
+            if rec_dist.job_id == frame_dist.job_id:
+                return ""
+            rec_is_owner = bool(annotator_key and annotator_key in rec_dist.assignee_keys)
+            frm_is_owner = bool(annotator_key and annotator_key in frame_dist.assignee_keys)
+            if rec_is_owner and not frm_is_owner:
+                # Recorded Job ID IS assigned to this annotator -> ID is RIGHT, Frame is WRONG!
+                return (
+                    f"Sai Frame {side_label}: ID {rec_dist.job_id} ({rec_dist.start_frame}~{rec_dist.end_frame}) đúng, "
+                    f"ghi nhầm sang frame Job {frame_dist.job_id} ({frame_dist.start_frame}~{frame_dist.end_frame}) [{rec_dist.task_name}]"
+                )
+            if frm_is_owner and not rec_is_owner:
+                # Frame's Job IS assigned to this annotator -> Frame is RIGHT, Job ID is WRONG!
+                return (
+                    f"Sai ID Job {side_label}: ghi {rec_dist.job_id} ({rec_dist.start_frame}~{rec_dist.end_frame}), "
+                    f"đúng là {frame_dist.job_id} ({frame_dist.start_frame}~{frame_dist.end_frame}) [{frame_dist.task_name}]"
+                )
+            if rec_is_owner and frm_is_owner:
+                # Same annotator owns both jobs -> flag clearly that ID and Frame disagree
+                return (
+                    f"Lệch ID Job / Frame {side_label}: ghi ID {rec_dist.job_id} ({rec_dist.start_frame}~{rec_dist.end_frame}), "
+                    f"frame thuộc Job {frame_dist.job_id} ({frame_dist.start_frame}~{frame_dist.end_frame}) [{frame_dist.task_name}]"
+                )
+            # Neither has assignee match -> fallback to Job ID mismatch warning
+            return (
+                f"Sai ID Job {side_label}: ghi {rec_dist.job_id} ({rec_dist.start_frame}~{rec_dist.end_frame}), "
+                f"đúng là {frame_dist.job_id} ({frame_dist.start_frame}~{frame_dist.end_frame}) [{frame_dist.task_name}]"
+            )
+
+        # Case 2: Recorded ID is valid in Distribution, but frame [sf, ef] falls outside ALL jobs in that task
+        if rec_dist is not None and frame_dist is None:
+            return (
+                f"Sai Frame {side_label}: ID {rec_dist.job_id} có frame {rec_dist.start_frame}~{rec_dist.end_frame}, "
+                f"đang ghi {sf}~{ef} [{rec_dist.task_name}]"
+            )
+
+        # Case 3: Recorded ID missing/unknown, but frame matches a known Distribution job in the same task
+        if rec_dist is None and frame_dist is not None:
+            return (
+                f"Sai ID Job {side_label}: ghi {recorded_id or '(trống)'}, "
+                f"đúng là {frame_dist.job_id} ({frame_dist.start_frame}~{frame_dist.end_frame}) [{frame_dist.task_name}]"
+            )
+        return ""
+
+    def _check_dist_job_ids(wb: WorklogBlockRecord, matched_rws: List[ReworkRecord]) -> str:
+        if not ds.distribution_jobs or wb.start_frame is None or wb.end_frame is None:
+            return ""
+        fallback_tn = _resolve_dist_task_key(wb, matched_rws)
+
+        sf, ef = wb.start_frame, wb.end_frame
+        if sf > ef:
+            sf, ef = ef, sf
+
+        issues: List[str] = []
+        wl_task_jobs = _same_task_jobs_for(wb.job_id, fallback_tn)
+        if wl_task_jobs:
+            wl_frame_dist = _find_frame_dist(wl_task_jobs, wb.job_id, wb.annotator_key, sf, ef)
+            wl_issue = _diagnose_dist_mismatch("Work Log", wb.job_id, wb.annotator_key, sf, ef, wl_frame_dist)
+            if wl_issue:
+                issues.append(wl_issue)
+
+        seen_rw_jids = []
+        for rw in matched_rws:
+            if rw.job_id and rw.job_id not in seen_rw_jids:
+                seen_rw_jids.append(rw.job_id)
+        for rw_jid in seen_rw_jids:
+            rw_sf = matched_rws[0].start_frame if matched_rws and matched_rws[0].start_frame is not None else sf
+            rw_ef = matched_rws[0].end_frame if matched_rws and matched_rws[0].end_frame is not None else ef
+            if rw_sf > rw_ef:
+                rw_sf, rw_ef = rw_ef, rw_sf
+            rw_task_jobs = _same_task_jobs_for(rw_jid, fallback_tn)
+            if rw_task_jobs:
+                rw_frame_dist = _find_frame_dist(rw_task_jobs, rw_jid, wb.annotator_key, rw_sf, rw_ef)
+                rw_issue = _diagnose_dist_mismatch("Review", rw_jid, wb.annotator_key, rw_sf, rw_ef, rw_frame_dist)
+                if rw_issue:
+                    issues.append(rw_issue)
+
+        return " | ".join(issues)
+
     # Index ALL Rework records by (worker_key, task) across ALL dates
     rw_by_wt: Dict[Tuple[str, str], List[ReworkRecord]] = defaultdict(list)
     for r in ds.rework_records:
@@ -1219,9 +1655,17 @@ def _match_blocks_with_frame_ranges(
 
         if matched_single is not None:
             _consume_rw(wt_key, [matched_single])
-            if abs(matched_single.frames - wb.frames) <= 1e-6 and abs(matched_single.bbox - wb.bbox) <= 1e-6:
+            job_err = _check_dist_job_ids(wb, [matched_single])
+            exact_vals = abs(matched_single.frames - wb.frames) <= 1e-6 and abs(matched_single.bbox - wb.bbox) <= 1e-6
+            if exact_vals and not job_err:
                 continue  # 100% exact match regardless of review date!
-            diff_kind, diff_reason = _classify_daily_diff(wb.frames, matched_single.frames, wb.bbox, matched_single.bbox)
+            if exact_vals:
+                diff_kind, diff_reason = "mismatch", job_err
+            else:
+                diff_kind, diff_reason = _classify_daily_diff(wb.frames, matched_single.frames, wb.bbox, matched_single.bbox)
+                if job_err:
+                    diff_kind = "mismatch"
+                    diff_reason = f"{diff_reason} | {job_err}"
             diffs_by_ann_task[wt_key].append(DailyDiffRecord(
                 date=wb.date,
                 rw_date=matched_single.date_inspect or matched_single.date_work,
@@ -1262,13 +1706,18 @@ def _match_blocks_with_frame_ranges(
             sum_bb = sum(c.bbox for c in overlaps)
             min_sf = min(c.start_frame for c in overlaps if c.start_frame is not None)
             max_ef = max(c.end_frame for c in overlaps if c.end_frame is not None)
+            job_err = _check_dist_job_ids(wb, overlaps)
 
             # Check 1-to-N split exact match (1 WL block split into multiple RW rows)
-            if min_sf == wb.start_frame and max_ef == wb.end_frame and abs(sum_fr - wb.frames) <= 1e-6 and abs(sum_bb - wb.bbox) <= 1e-6:
+            is_exact_overlap = (
+                min_sf == wb.start_frame and max_ef == wb.end_frame
+                and abs(sum_fr - wb.frames) <= 1e-6 and abs(sum_bb - wb.bbox) <= 1e-6
+            )
+            if is_exact_overlap and not job_err:
                 continue
 
             # Check N-to-1 merge exact match (multiple WL blocks merged into 1 RW row)
-            if len(overlaps) == 1:
+            if not is_exact_overlap and len(overlaps) == 1:
                 rw_one = overlaps[0]
                 if rw_one.start_frame is not None and rw_one.end_frame is not None:
                     sibs = [
@@ -1283,13 +1732,24 @@ def _match_blocks_with_frame_ranges(
                         s_fr = sum(s.frames for s in sibs)
                         s_bb = sum(s.bbox for s in sibs)
                         if s_min == rw_one.start_frame and s_max == rw_one.end_frame and abs(s_fr - rw_one.frames) <= 1e-6 and abs(s_bb - rw_one.bbox) <= 1e-6:
-                            continue
+                            if not job_err:
+                                continue
+                            is_exact_overlap = True
 
             rw_rng = _fmt_range(min_sf, max_ef)
-            if min_sf != wb.start_frame or max_ef != wb.end_frame:
+            if is_exact_overlap and job_err:
+                diff_kind = "mismatch"
+                reason = job_err
+            elif min_sf != wb.start_frame or max_ef != wb.end_frame:
+                diff_kind = "mismatch"
                 reason = f"Lệch Frame Start/End (Work Log {wl_rng} ≠ Review {rw_rng})"
+                if job_err:
+                    reason = f"{reason} | {job_err}"
             else:
-                _, reason = _classify_daily_diff(wb.frames, sum_fr, wb.bbox, sum_bb)
+                diff_kind, reason = _classify_daily_diff(wb.frames, sum_fr, wb.bbox, sum_bb)
+                if job_err:
+                    diff_kind = "mismatch"
+                    reason = f"{reason} | {job_err}"
             rw_dt = min((c.date_inspect or c.date_work for c in overlaps if (c.date_inspect or c.date_work)), default=None)
             diffs_by_ann_task[wt_key].append(DailyDiffRecord(
                 date=wb.date,
@@ -1304,12 +1764,58 @@ def _match_blocks_with_frame_ranges(
                 wl_cells=wl_loc,
                 rw_rows=_format_rw_locs(overlaps),
                 reason=reason,
-                kind="mismatch",
+                kind=diff_kind,
                 job_id=wb.job_id or overlaps[0].job_id,
                 wl_range=wl_rng,
                 rw_range=rw_rng,
             ))
             continue
+
+        # 2.5. Fallback when Start/End Frame has a typo (e.g. Review typed 23000~23049 instead of 33000~33049):
+        # match unused Review record with SAME Job ID + SAME Frames (prefer matching BBOX & closest date)
+        if wb.start_frame is not None and wb.end_frame is not None and wb.job_id:
+            same_job_cands = []
+            for c in cands:
+                if id(c) in matched_rw_ids or c.job_id != wb.job_id:
+                    continue
+                if abs(c.frames - wb.frames) > 1e-6:
+                    continue
+                d_ref = c.date_work or c.date_inspect
+                if d_ref is not None and abs((d_ref - wb.date).days) > 14:
+                    continue
+                same_job_cands.append(c)
+            if same_job_cands:
+                def _score_sj(c: ReworkRecord) -> Tuple[int, int]:
+                    bb_pen = 0 if (abs(c.bbox - wb.bbox) <= 1e-6 or c.bbox == 0 or wb.bbox == 0) else 1
+                    d_ref = c.date_work or c.date_inspect
+                    dist = abs((d_ref - wb.date).days) if d_ref else 0
+                    return (bb_pen, dist)
+                sj_match = min(same_job_cands, key=_score_sj)
+                _consume_rw(wt_key, [sj_match])
+                rw_rng = _fmt_range(sj_match.start_frame, sj_match.end_frame)
+                job_err = _check_dist_job_ids(wb, [sj_match])
+                reason = f"Lệch Frame Start/End (Work Log {wl_rng} ≠ Review {rw_rng})"
+                if job_err:
+                    reason = f"{reason} | {job_err}"
+                diffs_by_ann_task[wt_key].append(DailyDiffRecord(
+                    date=wb.date,
+                    rw_date=sj_match.date_inspect or sj_match.date_work,
+                    task=wb.task,
+                    annotator_key=wb.annotator_key,
+                    annotator=wb.annotator_display,
+                    wl_frames=wb.frames,
+                    rw_frames=sj_match.frames,
+                    wl_bbox=wb.bbox,
+                    rw_bbox=sj_match.bbox,
+                    wl_cells=wl_loc,
+                    rw_rows=_format_rw_locs([sj_match]),
+                    reason=reason,
+                    kind="mismatch",
+                    job_id=wb.job_id,
+                    wl_range=wl_rng,
+                    rw_range=rw_rng,
+                ))
+                continue
 
         # 3. Fallback when WL block lacks Start/End Frame: match by Job ID + Frames/BBOX
         if wb.start_frame is None or wb.end_frame is None:
@@ -1345,7 +1851,8 @@ def _match_blocks_with_frame_ranges(
                 ))
                 continue
 
-        # 4. Not found anywhere in Rework -> pending_rework (NOT a data error!)
+        # 4. Not found anywhere in Rework -> pending_rework (or mismatch if Work Log Job ID is wrong vs Distribution!)
+        job_err = _check_dist_job_ids(wb, [])
         diffs_by_ann_task[wt_key].append(DailyDiffRecord(
             date=wb.date,
             rw_date=None,
@@ -1358,12 +1865,53 @@ def _match_blocks_with_frame_ranges(
             rw_bbox=0.0,
             wl_cells=wl_loc,
             rw_rows="",
-            reason="Chưa có data bên Review",
-            kind="pending_rework",
+            reason=f"Chưa có data bên Review | {job_err}" if job_err else "Chưa có data bên Review",
+            kind="mismatch" if job_err else "pending_rework",
             job_id=wb.job_id,
             wl_range=wl_rng,
             rw_range="",
         ))
+
+    # 5. Audit unmatched Review (Inspection) records in [start_date, end_date] against Distribution Sheet
+    if ds.distribution_jobs:
+        for r in ds.rework_records:
+            if id(r) in matched_rw_ids:
+                continue
+            if selected_annotators is not None and r.worker_key not in selected_annotators:
+                continue
+            if r.start_frame is None or r.end_frame is None or not r.job_id:
+                continue
+            r_dt = r.date_work or r.date_inspect
+            if r_dt is None or not (start_date <= r_dt <= end_date):
+                continue
+            task_jobs = _same_task_jobs_for(r.job_id, "")
+            if not task_jobs:
+                continue
+            rw_sf, rw_ef = r.start_frame, r.end_frame
+            if rw_sf > rw_ef:
+                rw_sf, rw_ef = rw_ef, rw_sf
+            rw_frame_dist = _find_frame_dist(task_jobs, r.job_id, r.worker_key, rw_sf, rw_ef)
+            rw_issue = _diagnose_dist_mismatch("Review", r.job_id, r.worker_key, rw_sf, rw_ef, rw_frame_dist)
+            if rw_issue:
+                wt_key = (r.worker_key, r.task)
+                diffs_by_ann_task[wt_key].append(DailyDiffRecord(
+                    date=r_dt,
+                    rw_date=r.date_inspect or r.date_work,
+                    task=r.task,
+                    annotator_key=r.worker_key,
+                    annotator=r.worker_display,
+                    wl_frames=0.0,
+                    rw_frames=r.frames,
+                    wl_bbox=0.0,
+                    rw_bbox=r.bbox,
+                    wl_cells="",
+                    rw_rows=_format_rw_locs([r]),
+                    reason=rw_issue,
+                    kind="mismatch",
+                    job_id=r.job_id,
+                    wl_range="",
+                    rw_range=_fmt_range(r.start_frame, r.end_frame),
+                ))
 
     return diffs_by_ann_task, rw_agg_all, matched_rw_records
 

@@ -89,9 +89,9 @@ def clear_sp_session(cache_dir: str):
                 pass
 
 
-def extract_sp_site_url(wl_url: str = "", rw_url: str = "") -> str:
+def extract_sp_site_url(*urls: str) -> str:
     """Return the SharePoint site URL (NOT Excel Online) to open for clean sign-in."""
-    for u in (wl_url, rw_url):
+    for u in urls:
         u = (u or "").strip()
         if not u.startswith("http"):
             continue
@@ -109,37 +109,67 @@ def extract_sp_site_url(wl_url: str = "", rw_url: str = "") -> str:
 
 
 def build_download_candidates(raw_url: str):
-    """Return ordered list of direct download URLs for a SharePoint link."""
+    """Return ordered list of direct download URLs for a SharePoint link (including Doc.aspx?sourcedoc=...)."""
     url = (raw_url or "").strip()
     if not url:
         return []
     parsed = urllib.parse.urlparse(url)
     decoded_path = urllib.parse.unquote(parsed.path or "")
+    qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
     candidates = []
 
     idx = decoded_path.lower().find("/sites/")
+    site_prefix = ""
+    site_rel = ""
     if idx >= 0:
-        site_rel = decoded_path[idx:]  # /sites/<site>/Shared Documents/file.xlsx
+        site_rel = decoded_path[idx:]
         parts = [p for p in site_rel.split("/") if p]
-        if len(parts) >= 3 and parts[0].lower() == "sites":
+        if len(parts) >= 2 and parts[0].lower() == "sites":
             site_prefix = f"/sites/{parts[1]}"
-            # 1. SharePoint REST API $value (fastest, pure binary, never renders HTML viewer)
-            escaped_rel = urllib.parse.quote(site_rel.replace("'", "''"), safe="/")
-            candidates.append(
-                f"{parsed.scheme}://{parsed.netloc}{site_prefix}/_api/web/"
-                f"GetFileByServerRelativeUrl('{escaped_rel}')/$value"
-            )
-            # 2. Classic SharePoint download.aspx
-            src_q = urllib.parse.urlencode({"SourceUrl": site_rel}, quote_via=urllib.parse.quote)
-            candidates.append(
-                f"{parsed.scheme}://{parsed.netloc}{site_prefix}/_layouts/15/download.aspx?{src_q}"
-            )
 
-    # 3. Sharing link with download=1
-    qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-    qs.pop("web", None)
-    qs["download"] = ["1"]
-    candidates.append(urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(qs, doseq=True))))
+    # Handle _layouts/15/Doc.aspx?sourcedoc={GUID}&file=... links
+    sourcedoc_vals = qs.get("sourcedoc") or qs.get("UniqueId") or []
+    sourcedoc = (sourcedoc_vals[0] if sourcedoc_vals else "").strip()
+    guid = sourcedoc.strip("{}").strip()
+    file_vals = qs.get("file") or []
+    file_name = (file_vals[0] if file_vals else "").strip()
+
+    if site_prefix and guid:
+        # 1. SharePoint REST API GetFileById (works regardless of folder path)
+        candidates.append(
+            f"{parsed.scheme}://{parsed.netloc}{site_prefix}/_api/web/GetFileById('{guid}')/$value"
+        )
+        # 2. Classic SharePoint download.aspx with UniqueId
+        uid_q = urllib.parse.urlencode({"UniqueId": guid})
+        candidates.append(
+            f"{parsed.scheme}://{parsed.netloc}{site_prefix}/_layouts/15/download.aspx?{uid_q}"
+        )
+
+    if site_prefix and site_rel and "_layouts/" not in site_rel.lower():
+        # Standard direct path link: /sites/<site>/Shared Documents/file.xlsx
+        escaped_rel = urllib.parse.quote(site_rel.replace("'", "''"), safe="/")
+        candidates.append(
+            f"{parsed.scheme}://{parsed.netloc}{site_prefix}/_api/web/"
+            f"GetFileByServerRelativeUrl('{escaped_rel}')/$value"
+        )
+        src_q = urllib.parse.urlencode({"SourceUrl": site_rel}, quote_via=urllib.parse.quote)
+        candidates.append(
+            f"{parsed.scheme}://{parsed.netloc}{site_prefix}/_layouts/15/download.aspx?{src_q}"
+        )
+    elif site_prefix and file_name:
+        # Fallback: try Shared Documents/<file_name>
+        rel_guess = f"{site_prefix}/Shared Documents/{file_name}"
+        escaped_rel = urllib.parse.quote(rel_guess.replace("'", "''"), safe="/")
+        candidates.append(
+            f"{parsed.scheme}://{parsed.netloc}{site_prefix}/_api/web/"
+            f"GetFileByServerRelativeUrl('{escaped_rel}')/$value"
+        )
+
+    # Final fallback: Sharing link with download=1
+    qs_dl = {k: list(v) for k, v in qs.items()}
+    qs_dl.pop("web", None)
+    qs_dl["download"] = ["1"]
+    candidates.append(urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(qs_dl, doseq=True))))
     return candidates
 
 
@@ -165,6 +195,8 @@ def download_sp_file_with_cookies(
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "*/*",
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
     }
 
     last_err = ""
@@ -322,17 +354,18 @@ class SharePointLoginDialog(QDialog):
 
 
 class SharePointDownloadThread(QThread):
-    """Background HTTP downloader for 1-2 SharePoint .xlsx files using captured session cookies."""
+    """Background HTTP downloader for 1-3 SharePoint .xlsx files using captured session cookies."""
 
     progress = pyqtSignal(int, str)
-    finished_ok = pyqtSignal(str, str)
+    finished_ok = pyqtSignal(str, str, str)
     need_login = pyqtSignal()
     failed = pyqtSignal(str)
 
-    def __init__(self, wl_url: str, rw_url: str, cache_dir: str):
+    def __init__(self, wl_url: str, rw_url: str, cache_dir: str, dist_url: str = ""):
         super().__init__()
         self.wl_url = wl_url
         self.rw_url = rw_url
+        self.dist_url = dist_url
         self.cache_dir = cache_dir
 
     def run(self):
@@ -344,26 +377,36 @@ class SharePointDownloadThread(QThread):
 
             wl_dest = ""
             rw_dest = ""
+            dist_dest = ""
             if self.wl_url.strip():
                 wl_dest = os.path.join(self.cache_dir, "Work_log_SharePoint.xlsx")
-                self.progress.emit(15, "Đang tải Work_log từ SharePoint...")
+                self.progress.emit(10, "Đang tải Work_log từ SharePoint...")
                 download_sp_file_with_cookies(
                     self.wl_url.strip(),
                     wl_dest,
                     cookies,
-                    progress_cb=lambda p: self.progress.emit(15 + int(p * 0.40), f"Đang tải Work_log ({p}%)..."),
+                    progress_cb=lambda p: self.progress.emit(10 + int(p * 0.30), f"Đang tải Work_log ({p}%)..."),
                 )
             if self.rw_url.strip():
                 rw_dest = os.path.join(self.cache_dir, "Inspection_And_Rework_SharePoint.xlsx")
-                self.progress.emit(60, "Đang tải Inspection & Rework từ SharePoint...")
+                self.progress.emit(45, "Đang tải Inspection & Rework từ SharePoint...")
                 download_sp_file_with_cookies(
                     self.rw_url.strip(),
                     rw_dest,
                     cookies,
-                    progress_cb=lambda p: self.progress.emit(60 + int(p * 0.35), f"Đang tải Inspection & Rework ({p}%)..."),
+                    progress_cb=lambda p: self.progress.emit(45 + int(p * 0.30), f"Đang tải Inspection & Rework ({p}%)..."),
+                )
+            if self.dist_url.strip():
+                dist_dest = os.path.join(self.cache_dir, "Distribution_Sheet_SharePoint.xlsx")
+                self.progress.emit(78, "Đang tải Distribution Sheet từ SharePoint...")
+                download_sp_file_with_cookies(
+                    self.dist_url.strip(),
+                    dist_dest,
+                    cookies,
+                    progress_cb=lambda p: self.progress.emit(78 + int(p * 0.20), f"Đang tải Distribution Sheet ({p}%)..."),
                 )
             self.progress.emit(100, "Đã tải xong từ SharePoint!")
-            self.finished_ok.emit(wl_dest, rw_dest)
+            self.finished_ok.emit(wl_dest, rw_dest, dist_dest)
         except SessionExpiredError:
             self.need_login.emit()
         except Exception as exc:

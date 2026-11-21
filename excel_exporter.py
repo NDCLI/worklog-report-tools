@@ -554,9 +554,10 @@ def _write_audit_and_notes_sheet(wb: openpyxl.Workbook, report: ReportResult):
         if sk == "mismatch":
             status = "⚠ LỆCH DATA"
         elif sk == "pending":
-            status = "⏳ Chưa có data"
+            only_miss_bb = bool(rdata.pending_diffs) and all(d.is_missing_bbox for d in rdata.pending_diffs)
+            status = "⏳ Chưa nhập BBOX" if only_miss_bb else "⏳ Chưa có data"
         else:
-            status = "✓ Khớp 100%"
+            status = "✓ Khớp"
         m_dates = rdata.status_dates_summary
         vals = [
             rdata.task,
@@ -575,12 +576,7 @@ def _write_audit_and_notes_sheet(wb: openpyxl.Workbook, report: ReportResult):
             cell = ws.cell(cur_row, c, v)
             cell.border = _make_border()
             cell.font = FONT_AUDIT_REG
-            if c in (1, 2, 9, 10):
-                cell.alignment = ALIGN_CENTER
-            elif c == 11:
-                cell.alignment = ALIGN_LEFT
-            else:
-                cell.alignment = ALIGN_RIGHT
+            cell.alignment = ALIGN_CENTER
             if sk == "mismatch":
                 cell.fill = WARN_FILL
                 if c in (5, 8, 10, 11):
@@ -602,7 +598,7 @@ def _write_audit_and_notes_sheet(wb: openpyxl.Workbook, report: ReportResult):
         ws.merge_cells(start_row=cur_row, start_column=1, end_row=cur_row, end_column=13)
         ws.cell(
             cur_row, 1,
-            f"CHI TIẾT ĐỐI CHIẾU THEO FRAME START/END: {real_cnt} BLOCK LỆCH DATA · {pend_cnt} BLOCK CHƯA CÓ DATA REVIEW"
+            f"CHI TIẾT ĐỐI CHIẾU THEO FRAME START/END: {real_cnt} BLOCK LỆCH DATA · {pend_cnt} BLOCK CHƯA CÓ DATA / BBOX"
         ).font = FONT_AUDIT_HDR
         for c in range(1, 14):
             ws.cell(cur_row, c).fill = DARK_HEADER_FILL
@@ -627,9 +623,20 @@ def _write_audit_and_notes_sheet(wb: openpyxl.Workbook, report: ReportResult):
         for d in report.daily_diffs:
             ws.row_dimensions[cur_row].height = 20
             is_pend = d.is_pending
-            kind_lbl = "⏳ Chưa có data" if is_pend else "⚠ LỆCH DATA"
+            if d.is_missing_bbox:
+                kind_lbl = "⏳ Chưa nhập BBOX"
+            elif is_pend:
+                kind_lbl = "⏳ Chưa có data"
+            elif d.is_dist_frame_mismatch:
+                kind_lbl = "⚠ SAI FRAME"
+            elif d.is_job_id_mismatch:
+                kind_lbl = "⚠ SAI ID JOB"
+            else:
+                kind_lbl = "⚠ LỆCH DATA"
             row_fill = INFO_FILL if is_pend else WARN_FILL
             accent_font = FONT_INFO if is_pend else FONT_WARN
+            miss_rw_bb = (d.rw_frames > 0 and d.wl_bbox > 0 and d.rw_bbox <= 0)
+            miss_wl_bb = (d.wl_frames > 0 and d.rw_bbox > 0 and d.wl_bbox <= 0)
             vals = [
                 kind_lbl,
                 d.annotator,
@@ -640,9 +647,9 @@ def _write_audit_and_notes_sheet(wb: openpyxl.Workbook, report: ReportResult):
                 _clean_num(d.wl_frames),
                 _clean_num(d.rw_frames),
                 _clean_num(d.diff_frame),
-                _clean_num(d.wl_bbox),
-                _clean_num(d.rw_bbox),
-                _clean_num(d.diff_bbox),
+                "—" if miss_wl_bb else _clean_num(d.wl_bbox),
+                "—" if miss_rw_bb else _clean_num(d.rw_bbox),
+                "—" if (miss_rw_bb or miss_wl_bb) else _clean_num(d.diff_bbox),
                 d.reason,
             ]
             for c, v in enumerate(vals, start=1):
@@ -650,7 +657,7 @@ def _write_audit_and_notes_sheet(wb: openpyxl.Workbook, report: ReportResult):
                 cell.border = _make_border()
                 cell.fill = row_fill
                 cell.font = accent_font if c in (1, 3, 6, 9, 12, 13) else FONT_AUDIT_REG
-                cell.alignment = ALIGN_LEFT if c == 13 else (ALIGN_CENTER if c in (1, 2, 3, 4, 5, 6) else ALIGN_RIGHT)
+                cell.alignment = ALIGN_CENTER
             cur_row += 1
 
     # Part 2: Parsed Work_log Notes detail (removed Sheet & Cell columns for clean view)
