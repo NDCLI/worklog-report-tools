@@ -1,10 +1,12 @@
 import datetime
 import json
 import os
+import re
 import sys
 import unicodedata
-from collections import Counter
-from typing import Dict, Optional, Set
+from collections import Counter, defaultdict
+from dataclasses import replace
+from typing import Dict, List, Optional, Set
 
 from PyQt6.QtCore import QDate, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetrics, QIcon, QKeySequence, QPainter, QShortcut
@@ -40,7 +42,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from data_engine import LoadedDataset, ReportResult, build_report, load_dataset
+from data_engine import DailyDiffRecord, LoadedDataset, ReportResult, build_report, load_dataset
 from excel_exporter import export_report_to_excel
 from sharepoint_client import (
     SharePointDownloadThread,
@@ -74,7 +76,7 @@ from updater import (
 
 
 APP_NAME = "Annotator & Inspector Report"
-APP_VERSION = "2.5"
+APP_VERSION = "2.6"
 
 DEFAULT_SP_WL_URL = (
     "https://hanwhaworkplace.sharepoint.com/:x:/r/sites/HVV-AILabAnnotation/"
@@ -259,6 +261,61 @@ def _fmt_time(v: float) -> str:
 
 def _fmt_f2(v: float) -> str:
     return f"{v:.2f}"
+
+
+def _merge_job_id_diff_rows(diffs: List[DailyDiffRecord]) -> List[DailyDiffRecord]:
+    groups = defaultdict(list)
+    for i, diff in enumerate(diffs):
+        if (
+            diff.is_pending
+            or not diff.reason.startswith("Sai ID Job Work Log:")
+            or " | " in diff.reason
+        ):
+            continue
+        wl_match = re.fullmatch(r"(-?\d+)~(-?\d+)", diff.wl_range)
+        rw_match = re.fullmatch(r"(-?\d+)~(-?\d+)", diff.rw_range)
+        if not wl_match or not rw_match or not re.fullmatch(r"[^;]+!R\d+", diff.rw_rows):
+            continue
+        start, end = sorted(map(int, wl_match.groups()))
+        if [start, end] != sorted(map(int, rw_match.groups())):
+            continue
+        key = (diff.annotator_key, diff.task, diff.job_id, diff.reason)
+        groups[key].append((start, end, i))
+
+    display_rows = dict(enumerate(diffs))
+    for blocks in groups.values():
+        blocks.sort()
+        if any(end >= next_start for (_, end, _), (next_start, _, _) in zip(blocks, blocks[1:])):
+            continue
+        runs = []
+        for block in blocks:
+            if not runs or runs[-1][-1][1] + 1 != block[0]:
+                runs.append([])
+            runs[-1].append(block)
+
+        for run in runs:
+            if len(run) < 2:
+                continue
+            indices = sorted(i for _, _, i in run)
+            rows = [diffs[i] for i in indices]
+            if len({row.rw_rows for row in rows}) != len(rows):
+                continue
+            first = min(rows, key=lambda row: row.date)
+            frame_range = f"{run[0][0]}~{run[-1][1]}"
+            display_rows[indices[0]] = replace(
+                first,
+                rw_date=min((row.rw_date for row in rows if row.rw_date is not None), default=None),
+                wl_frames=sum(row.wl_frames for row in rows),
+                rw_frames=sum(row.rw_frames for row in rows),
+                wl_bbox=sum(row.wl_bbox for row in rows),
+                rw_bbox=sum(row.rw_bbox for row in rows),
+                wl_range=frame_range,
+                rw_range=frame_range,
+            )
+            for i in indices[1:]:
+                del display_rows[i]
+
+    return list(display_rows.values())
 
 
 class LoaderThread(QThread):
@@ -689,7 +746,9 @@ class MainWindow(QMainWindow):
         main_lay.setSpacing(12)
 
         # File Drop Cards Row
-        files_row = QHBoxLayout()
+        files_container = QWidget()
+        files_row = QHBoxLayout(files_container)
+        files_row.setContentsMargins(0, 0, 0, 0)
         files_row.setSpacing(10)
         self.card_wl = FileDropCard("FILE WORK LOG (CẢ EXCEL NOTES)", "Kéo thả hoặc chọn Work_log_*.xlsx", "#2563EB")
         self.card_wl.browse_clicked.connect(lambda: self._browse_file("wl"))
@@ -706,7 +765,8 @@ class MainWindow(QMainWindow):
         files_row.addWidget(self.card_wl, 1)
         files_row.addWidget(self.card_rw, 1)
         files_row.addWidget(self.card_dist, 1)
-        main_lay.addLayout(files_row)
+        main_lay.addWidget(files_container)
+        files_container.hide()
 
         # Single-person isolation banner (hidden unless active)
         self.isolate_banner = QFrame()
@@ -806,7 +866,7 @@ class MainWindow(QMainWindow):
         w_rlay = QVBoxLayout(w_rank_box)
         w_rlay.setContentsMargins(0, 0, 4, 0)
         w_rlay.setSpacing(5)
-        self.lbl_rank_worker = QLabel("🥇 Xếp hạng Annotator (Worker — Lỗi Lần 1 + Pangyo)")
+        self.lbl_rank_worker = QLabel("🥇 Xếp hạng Annotator (Worker — Lỗi Lần 1 + Lần 2)")
         self.lbl_rank_worker.setStyleSheet("font-weight: 700; font-size: 12.5px; color: #2563EB;")
         w_rlay.addWidget(self.lbl_rank_worker)
         self.tbl_rank_worker = QTableWidget()
@@ -819,7 +879,7 @@ class MainWindow(QMainWindow):
         rev_rlay = QVBoxLayout(rev_rank_box)
         rev_rlay.setContentsMargins(4, 0, 0, 0)
         rev_rlay.setSpacing(5)
-        self.lbl_rank_reviewer = QLabel("🥇 Xếp hạng Người Review Lần 1 (Inspector — Lỗi Pangyo)")
+        self.lbl_rank_reviewer = QLabel("🥇 Xếp hạng Người Review Lần 1 (Inspector)")
         self.lbl_rank_reviewer.setStyleSheet("font-weight: 700; font-size: 12.5px; color: #059669;")
         rev_rlay.addWidget(self.lbl_rank_reviewer)
         self.tbl_rank_reviewer = QTableWidget()
@@ -850,9 +910,20 @@ class MainWindow(QMainWindow):
         top_alay = QVBoxLayout(top_a)
         top_alay.setContentsMargins(0, 0, 0, 0)
         top_alay.setSpacing(5)
-        self.lbl_audit_hdr = QLabel("Đối chiếu Work Log (+ Note) vs Review (#IMAGE)")
-        self.lbl_audit_hdr.setStyleSheet("font-weight: 700; font-size: 12.5px;")
-        top_alay.addWidget(self.lbl_audit_hdr)
+        audit_header_row = QHBoxLayout()
+        audit_header_row.addWidget(QLabel("Lọc trạng thái:"))
+        self.cb_audit_status = QComboBox()
+        self.cb_audit_status.addItem("Tất cả", "")
+        self.cb_audit_status.addItem("Không khớp", "mismatch")
+        self.cb_audit_status.addItem("Chưa có data / BBOX", "pending")
+        self.cb_audit_status.addItem("Khớp", "ok")
+        self.cb_audit_status.setMinimumWidth(190)
+        self.cb_audit_status.currentIndexChanged.connect(
+            lambda: self._render_audit_table(self.current_report) if self.current_report else None
+        )
+        audit_header_row.addWidget(self.cb_audit_status)
+        audit_header_row.addStretch(1)
+        top_alay.addLayout(audit_header_row)
         self.tbl_audit = QTableWidget()
         self._setup_table(self.tbl_audit)
         self.tbl_audit.cellClicked.connect(self._on_audit_row_clicked)
@@ -893,7 +964,7 @@ class MainWindow(QMainWindow):
         audit_split.addWidget(bot_wrap)
         audit_split.setSizes([290, 290])
         page_ann_lay.addWidget(audit_split)
-        self.audit_mode_tabs.addTab(page_ann_audit, "Check Annotator")
+        self.audit_mode_tabs.addTab(page_ann_audit, "Annotator")
 
         # Sub-page 1: Check Reviewer (Inspector)
         page_rev_audit = QWidget()
@@ -905,9 +976,20 @@ class MainWindow(QMainWindow):
         top_ralay = QVBoxLayout(top_ra)
         top_ralay.setContentsMargins(0, 0, 0, 0)
         top_ralay.setSpacing(5)
-        self.lbl_rev_audit_hdr = QLabel("Đối chiếu Work Log Reviewer vs Inspection & Rework / Work Log Annotator / Distribution")
-        self.lbl_rev_audit_hdr.setStyleSheet("font-weight: 700; font-size: 12.5px;")
-        top_ralay.addWidget(self.lbl_rev_audit_hdr)
+        rev_header_row = QHBoxLayout()
+        rev_header_row.addWidget(QLabel("Lọc trạng thái:"))
+        self.cb_rev_audit_status = QComboBox()
+        self.cb_rev_audit_status.addItem("Tất cả", "")
+        self.cb_rev_audit_status.addItem("Không khớp", "mismatch")
+        self.cb_rev_audit_status.addItem("Chưa có data / BBOX", "pending")
+        self.cb_rev_audit_status.addItem("Khớp", "ok")
+        self.cb_rev_audit_status.setMinimumWidth(190)
+        self.cb_rev_audit_status.currentIndexChanged.connect(
+            lambda: self._render_reviewer_audit_table(self.current_report) if self.current_report else None
+        )
+        rev_header_row.addWidget(self.cb_rev_audit_status)
+        rev_header_row.addStretch(1)
+        top_ralay.addLayout(rev_header_row)
         self.tbl_rev_audit = QTableWidget()
         self._setup_table(self.tbl_rev_audit)
         self.tbl_rev_audit.cellClicked.connect(self._on_rev_audit_row_clicked)
@@ -944,7 +1026,7 @@ class MainWindow(QMainWindow):
         rev_audit_split.addWidget(bot_rwrap)
         rev_audit_split.setSizes([290, 290])
         page_rev_lay.addWidget(rev_audit_split)
-        self.audit_mode_tabs.addTab(page_rev_audit, "Check Reviewer (Inspector)")
+        self.audit_mode_tabs.addTab(page_rev_audit, "Inspector")
 
         audit_lay.addWidget(self.audit_mode_tabs)
         self.tabs.addTab(tab_audit, "Kiểm tra dữ liệu")
@@ -2093,9 +2175,9 @@ class MainWindow(QMainWindow):
                 row_bg, prefix_ic = self._row_status_style(r, hl)
                 kpi_bg = t["tbl_kpi_bg"]
                 err_info = (
-                    f"Worker (Lần 1 + Pangyo):\n"
-                    f"  • Lỗi BBOX:  {_fmt_int(r.total_err_bbox)} (Lần 1: {_fmt_int(r.err_first_bbox)} + Pangyo: {_fmt_int(r.err_second_bbox)})\n"
-                    f"  • Lỗi Frame: {_fmt_int(r.total_err_frame)} (Lần 1: {_fmt_int(r.err_first)} + Pangyo: {_fmt_int(r.err_second)})"
+                    f"Worker (Lần 1 + Lần 2):\n"
+                    f"  • Lỗi BBOX:  {_fmt_int(r.total_err_bbox)} (Lần 1: {_fmt_int(r.err_first_bbox)} + Lần 2: {_fmt_int(r.err_second_bbox)})\n"
+                    f"  • Lỗi Frame: {_fmt_int(r.total_err_frame)} (Lần 1: {_fmt_int(r.err_first)} + Lần 2: {_fmt_int(r.err_second)})"
                 )
                 tip = self._build_mismatch_tooltip(r, prefix=err_info)
                 has_any_issue = (r.has_mismatch or r.has_pending)
@@ -2268,7 +2350,7 @@ class MainWindow(QMainWindow):
                 tip = (
                     f"Reviewer {grp.inspector} chấm bài của {r.annotator}:\n"
                     f"  • Lỗi Lần 1 (Review): {_fmt_int(r.err_first)} Frame | {_fmt_int(r.err_first_bbox)} BBOX\n"
-                    f"  • Lỗi Lần 2 (Pangyo): {_fmt_int(r.err_second)} Frame | {_fmt_int(r.err_second_bbox)} BBOX"
+                    f"  • Lỗi Lần 2: {_fmt_int(r.err_second)} Frame | {_fmt_int(r.err_second_bbox)} BBOX"
                 )
                 if idx == 0:
                     tbl.setItem(row_i, 0, self._make_item(grp.inspector, Qt.AlignmentFlag.AlignCenter, True, t["task_badge_fg"], t["task_badge_bg"]))
@@ -2282,7 +2364,7 @@ class MainWindow(QMainWindow):
             sum_tip = (
                 f"Tổng hợp Reviewer {grp.inspector} ({n} Annotators):\n"
                 f"  • Tổng Load: {_fmt_int(grp.total_work_load)} Frame | {_fmt_int(grp.total_work_bbox)} BBOX | {_fmt_time(grp.total_work_time)}h\n"
-                f"  • Lỗi Pangyo: {_fmt_int(grp.total_err_second)} Frame ({_fmt_f2(grp.err_rate_frame)}%) | {_fmt_int(grp.total_err_second_bbox)} BBOX ({_fmt_f2(grp.err_rate_bbox)}%)\n"
+                f"  • Lỗi Lần 2: {_fmt_int(grp.total_err_second)} Frame ({_fmt_f2(grp.err_rate_frame)}%) | {_fmt_int(grp.total_err_second_bbox)} BBOX ({_fmt_f2(grp.err_rate_bbox)}%)\n"
                 f"  • Recall Lần 1: {_fmt_int(grp.total_err_first)} / ({_fmt_int(grp.total_err_first)} + {_fmt_int(grp.total_err_second)}) = {grp.first_inspector_recall:.0f}%"
             )
             c_align = Qt.AlignmentFlag.AlignCenter
@@ -2359,12 +2441,12 @@ class MainWindow(QMainWindow):
         )
 
         self.lbl_rank_worker.setText(f"🥇 Xếp hạng Annotator / Worker ({len(workers)} người — Tỉ lệ lỗi thấp nhất)")
-        self.lbl_rank_reviewer.setText(f"🥇 Xếp hạng Người Review Lần 1 ({len(reviewers)} người — Tỉ lệ lỗi Pangyo thấp nhất)")
+        self.lbl_rank_reviewer.setText(f"🥇 Xếp hạng Người Review Lần 1 ({len(reviewers)} người — Tỉ lệ lỗi thấp nhất)")
 
         # Populate Worker Ranking
         w_tbl = self.tbl_rank_worker
         w_headers = [
-            "Hạng", "Annotator", "Err Rate\nFrame (%)", "Err Rate\nBBOX (%)",
+            "Hạng", "Annotator", "Err Rate\nBBOX (%)", "Err Rate\nFrame (%)",
         ]
         w_tbl.setColumnCount(len(w_headers))
         w_tbl.setHorizontalHeaderLabels(w_headers)
@@ -2385,8 +2467,8 @@ class MainWindow(QMainWindow):
             )
             w_tbl.setItem(idx, 0, self._make_item(rank_lbl, Qt.AlignmentFlag.AlignCenter, True, rate_fg if is_top3 else None, bg, tip))
             w_tbl.setItem(idx, 1, self._make_item(r.annotator, Qt.AlignmentFlag.AlignCenter, True, None, bg, tip, user_data=(r.annotator, has_any_issue)))
-            w_tbl.setItem(idx, 2, self._make_item(_fmt_f2(r.total_err_rate), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
-            w_tbl.setItem(idx, 3, self._make_item(_fmt_f2(r.total_err_bbox_rate), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
+            w_tbl.setItem(idx, 2, self._make_item(_fmt_f2(r.total_err_bbox_rate), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
+            w_tbl.setItem(idx, 3, self._make_item(_fmt_f2(r.total_err_rate), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
         wh = w_tbl.horizontalHeader()
         wh.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         wh.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
@@ -2396,7 +2478,7 @@ class MainWindow(QMainWindow):
         # Populate Reviewer Lần 1 Ranking
         r_tbl = self.tbl_rank_reviewer
         r_headers = [
-            "Hạng", "Reviewer", "Err Rate\nFrame (%)", "Err Rate\nBBOX (%)",
+            "Hạng", "Reviewer", "Err Rate\nBBOX (%)", "Err Rate\nFrame (%)",
         ]
         r_tbl.setColumnCount(len(r_headers))
         r_tbl.setHorizontalHeaderLabels(r_headers)
@@ -2410,13 +2492,13 @@ class MainWindow(QMainWindow):
             tip = (
                 f"Hạng #{rank_num} — Reviewer {g.inspector}:\n"
                 f"  • Sản lượng: {_fmt_int(g.total_work_load)} Frame | {_fmt_int(g.total_work_bbox)} BBOX | {_fmt_time(g.total_work_time)}h\n"
-                f"  • Lỗi Pangyo: {_fmt_int(g.total_err_second)} Frame ({_fmt_f2(g.err_rate_frame)}%) | {_fmt_int(g.total_err_second_bbox)} BBOX ({_fmt_f2(g.err_rate_bbox)}%)\n"
+                f"  • Lỗi: {_fmt_int(g.total_err_second)} Frame ({_fmt_f2(g.err_rate_frame)}%) | {_fmt_int(g.total_err_second_bbox)} BBOX ({_fmt_f2(g.err_rate_bbox)}%)\n"
                 f"  • Recall Lần 1: {g.first_inspector_recall:.0f}%"
             )
             r_tbl.setItem(idx, 0, self._make_item(rank_lbl, Qt.AlignmentFlag.AlignCenter, True, rate_fg if is_top3 else None, bg, tip))
             r_tbl.setItem(idx, 1, self._make_item(g.inspector, Qt.AlignmentFlag.AlignCenter, True, None, bg, tip))
-            r_tbl.setItem(idx, 2, self._make_item(_fmt_f2(g.err_rate_frame), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
-            r_tbl.setItem(idx, 3, self._make_item(_fmt_f2(g.err_rate_bbox), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
+            r_tbl.setItem(idx, 2, self._make_item(_fmt_f2(g.err_rate_bbox), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
+            r_tbl.setItem(idx, 3, self._make_item(_fmt_f2(g.err_rate_frame), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
         rh = r_tbl.horizontalHeader()
         rh.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         rh.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
@@ -2426,6 +2508,7 @@ class MainWindow(QMainWindow):
     def _render_audit_table(self, rep: ReportResult):
         tbl = self.tbl_audit
         t = self.theme
+        selected_status = self.cb_audit_status.currentData() or ""
         headers = [
             "TASK", "Annotator",
             "Work Log\n(Frame)", "Review\n(Frame)", "Lệch\nFrame",
@@ -2436,18 +2519,15 @@ class MainWindow(QMainWindow):
         tbl.setHorizontalHeaderLabels(headers)
         tbl.setRowCount(len(rep.all_rows))
 
-        real_cnt = 0
-        pend_cnt = 0
         for row_i, r in enumerate(rep.all_rows):
             sk = r.status_kind
+            tbl.setRowHidden(row_i, bool(selected_status and selected_status != sk))
             if sk == "mismatch":
-                real_cnt += 1
                 bg = t["warn_soft"]
-                st_txt = "⚠ LỆCH DATA"
+                st_txt = "⚠ KHÔNG KHỚP"
                 st_fg = t["warn"]
                 st_bg = t["warn_soft"]
             elif sk == "pending":
-                pend_cnt += 1
                 bg = t["accent_soft"]
                 only_miss_bb = bool(r.pending_diffs) and all(d.is_missing_bbox for d in r.pending_diffs)
                 st_txt = "⏳ Chưa nhập BBOX" if only_miss_bb else "⏳ Chưa có data"
@@ -2475,16 +2555,6 @@ class MainWindow(QMainWindow):
             tbl.setItem(row_i, 9, self._make_item(dates_str, Qt.AlignmentFlag.AlignCenter, bold=has_any_issue, fg=st_fg if has_any_issue else t["text_muted"], bg=bg, tooltip=tip))
 
         self._auto_fit_columns(tbl, headers, header_height=44, stretch_last=True)
-        summary_parts = []
-        if real_cnt:
-            summary_parts.append(f"⚠ {real_cnt} dòng lệch data")
-        if pend_cnt:
-            summary_parts.append(f"⏳ {pend_cnt} dòng chưa có data / BBOX")
-        summary_str = " · ".join(summary_parts) if summary_parts else "✓ Khớp 100%"
-        self.lbl_audit_hdr.setText(
-            f"Đối chiếu Work Log (+ Note) vs Review (#IMAGE): {len(rep.all_rows)} dòng ({summary_str}) "
-            f"— bấm 1 dòng để xem chi tiết bên dưới"
-        )
 
     def _populate_note_filter(self, rep: ReportResult):
         prev = self.cb_note_ann.currentData()
@@ -2507,7 +2577,9 @@ class MainWindow(QMainWindow):
             return
         t = self.theme
         sel_ann = self.cb_note_ann.currentData() or ""
-        diffs = [d for d in self.current_report.daily_diffs if not sel_ann or d.annotator == sel_ann]
+        diffs = _merge_job_id_diff_rows([
+            d for d in self.current_report.daily_diffs if not sel_ann or d.annotator == sel_ann
+        ])
         real_c = sum(1 for d in diffs if d.kind == "mismatch")
         pend_c = sum(1 for d in diffs if d.kind == "pending_rework")
 
@@ -2644,6 +2716,7 @@ class MainWindow(QMainWindow):
     def _render_reviewer_audit_table(self, rep: ReportResult):
         tbl = self.tbl_rev_audit
         t = self.theme
+        selected_status = self.cb_rev_audit_status.currentData() or ""
         headers = [
             "TASK", "Reviewer",
             "WL Rev\n(Frame)", "Review\n(Frame)", "Lệch\nFrame",
@@ -2655,18 +2728,15 @@ class MainWindow(QMainWindow):
         rows = rep.reviewer_audit_rows
         tbl.setRowCount(len(rows))
 
-        real_cnt = 0
-        pend_cnt = 0
         for row_i, r in enumerate(rows):
             sk = r.status_kind
+            tbl.setRowHidden(row_i, bool(selected_status and selected_status != sk))
             if sk == "mismatch":
-                real_cnt += 1
                 bg = t["warn_soft"]
-                st_txt = "⚠ LỆCH DATA"
+                st_txt = "⚠ KHÔNG KHỚP"
                 st_fg = t["warn"]
                 st_bg = t["warn_soft"]
             elif sk == "pending":
-                pend_cnt += 1
                 bg = t["accent_soft"]
                 st_txt = "⏳ Chưa có data"
                 st_fg = t["accent_text"]
@@ -2691,16 +2761,6 @@ class MainWindow(QMainWindow):
             tbl.setItem(row_i, 9, self._make_item(dates_str, Qt.AlignmentFlag.AlignCenter, bold=has_any_issue, fg=st_fg if has_any_issue else t["text_muted"], bg=bg))
 
         self._auto_fit_columns(tbl, headers, header_height=44, stretch_last=True)
-        parts = []
-        if real_cnt:
-            parts.append(f"⚠ {real_cnt} dòng lệch data")
-        if pend_cnt:
-            parts.append(f"⏳ {pend_cnt} dòng chưa có data Review")
-        summary_str = " · ".join(parts) if parts else "✓ Khớp 100%"
-        self.lbl_rev_audit_hdr.setText(
-            f"Đối chiếu Work Log Reviewer vs Inspection & Rework / WL Annotator / Distribution: "
-            f"{len(rows)} dòng ({summary_str}) — bấm 1 dòng để lọc chi tiết bên dưới"
-        )
 
     def _populate_rev_audit_filter(self, rep: ReportResult):
         prev = self.cb_rev_audit_filter.currentData()
