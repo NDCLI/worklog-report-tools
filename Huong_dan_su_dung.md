@@ -14,19 +14,18 @@ Nhấp đúp trực tiếp vào file **`WorklogReportPro.exe`** (đặt sẵn tr
 3. **Lọc linh hoạt 1 người hoặc nhiều người**:
    - Lọc khoảng thời gian tùy ý + nút chọn nhanh (`Tuần trước`, `Tuần này`, `Tháng này`, `Tất cả`).
    - Chọn **TASK** bằng thẻ pill trực quan (`OD`, `SSEG`, `PFE`...).
-   - Chọn **Annotator** theo danh sách có hiện sẵn sản lượng trong kỳ; **nhấp đúp** vào 1 tên để xem riêng 1 người (có thanh thông báo + nút quay lại tất cả).
-4. **Chuyển đổi nguồn & Đối chiếu chi tiết tới từng ngày lệch**:
+   - Chọn **Annotator** theo danh sách có hiện sẵn sản lượng trong kỳ; **nhấp đúp** vào một tên để xem riêng người đó.
+   - Trong tab **Inspector**, dùng danh sách bên trái để tìm và chọn người kiểm tra. Bộ lọc này không thay đổi lựa chọn Annotator và cũng áp dụng cho sheet Inspector khi xuất Excel.
+4. **Chuyển đổi nguồn & đối chiếu từng ngày không khớp**:
    - Chuyển nhanh nguồn Frame/BBOX giữa **Rework `#IMAGE`** và **Work_log `+ Note`**.
    - Chuyển nhanh cột ngày Rework giữa **Ngày làm việc (Cột V)** và **DATE Inspect (Cột A)**.
-   - Tự động đối chiếu 2 file và **trỏ đích danh từng ngày bị lệch** (`Ngày bị lệch`, `Ô Work_log`, `Dòng Rework`, `Gợi ý nguyên nhân`):
-     - Rê chuột vào dòng `⚠` trên Mẫu 1 / Mẫu 2 để xem nhanh các ngày lệch.
-     - Nhấp đúp dòng `⚠` (hoặc bấm vào thẻ KPI Lỗi) để nhảy thẳng tới danh sách **Ngày bị lệch**.
-     - Nhấp đúp 1 dòng ngày lệch để mở đúng **Excel Note** của ngày đó.
+   - Trong **Kiểm tra dữ liệu**, chọn tab **Annotator** hoặc **Inspector**. Bảng trên tóm tắt trạng thái và số dòng cần xử lý theo từng người và Task.
+   - Bấm một dòng ở bảng trên để xem ngày, Job ID, Start/End Frame, số liệu đối chiếu và nguyên nhân ở bảng dưới.
 5. **Xuất Excel chuẩn 2 mẫu + Công thức sống**:
    - Xuất đồng thời `Report_By_Task` (Mẫu 1), `Report_By_Annotator` (Mẫu 2), và `Audit_Compare_&_Notes` với đầy đủ merge cell, viền đậm phân tách, chữ đỏ cho Error Rate/Average và công thức Excel tự tính.
 
 ## Phím tắt tiện dụng
 - `F5`: Nạp lại 2 file Excel sau khi vừa chỉnh sửa xong
-- `Ctrl + F`: Tìm nhanh tên Annotator
+- `Ctrl + F`: Tìm nhanh tên trong danh sách bên trái (Annotator hoặc Inspector tùy tab).
 - `Ctrl + C`: Copy bảng đang xem (dán thẳng vào Excel bằng `Ctrl+V`)
 - `Ctrl + E`: Xuất file Excel (`.xlsx`)

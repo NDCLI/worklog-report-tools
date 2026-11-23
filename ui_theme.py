@@ -489,31 +489,45 @@ QCheckBox::indicator:checked {{
 }}
 
 /* Scrollbars */
+QScrollBar {{
+    background: {t["bg_subtle"]};
+    border-radius: 6px;
+}}
 QScrollBar:vertical {{
-    background: transparent;
-    width: 8px;
-    margin: 2px;
+    width: 14px;
+    margin: 2px 1px;
+}}
+QScrollBar:horizontal {{
+    height: 14px;
+    margin: 1px 2px;
+}}
+QScrollBar::handle {{
+    background: {t["text_muted"]};
+    border-radius: 6px;
 }}
 QScrollBar::handle:vertical {{
-    background: {t["border_strong"]};
-    border-radius: 4px;
-    min-height: 24px;
+    min-height: 36px;
+}}
+QScrollBar::handle:horizontal {{
+    min-width: 36px;
+}}
+QScrollBar::handle:hover {{
+    background: {t["accent"]};
+}}
+QScrollBar::handle:pressed {{
+    background: {t["accent_hover"]};
+}}
+QScrollBar::add-page, QScrollBar::sub-page {{
+    background: transparent;
 }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
     height: 0px;
 }}
-QScrollBar:horizontal {{
-    background: transparent;
-    height: 8px;
-    margin: 2px;
-}}
-QScrollBar::handle:horizontal {{
-    background: {t["border_strong"]};
-    border-radius: 4px;
-    min-width: 24px;
-}}
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
     width: 0px;
+}}
+QAbstractScrollArea::corner {{
+    background: {t["bg_subtle"]};
 }}
 
 /* Progress Bar */

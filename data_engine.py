@@ -5,7 +5,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import openpyxl
 from openpyxl.utils import get_column_letter
@@ -106,6 +106,16 @@ def display_annotator_name(raw_name: str) -> str:
     if key in PREFERRED_DISPLAY_NAMES:
         return PREFERRED_DISPLAY_NAMES[key]
     return str(raw_name).strip().upper()
+
+
+def unique_inspector_names(raw_names: Iterable[str]) -> Tuple[str, ...]:
+    names_by_key = {}
+    for name in raw_names:
+        display = display_annotator_name(name)
+        if display:
+            key = normalize_annotator_key(name) or display.casefold()
+            names_by_key.setdefault(key, display)
+    return tuple(sorted(names_by_key.values()))
 
 
 def normalize_task(task: str) -> str:
@@ -1132,6 +1142,7 @@ class DailyDiffRecord:
     job_id: str = ""
     wl_range: str = ""                         # e.g. "5899~5999"
     rw_range: str = ""                         # e.g. "5900~5999"
+    inspectors: Tuple[str, ...] = ()
 
     @property
     def diff_frame(self) -> float:
@@ -1195,7 +1206,7 @@ class AggregatedRow:
 
     @property
     def role_label(self) -> str:
-        return "Reviewer Lần 1" if self.is_reviewer else "Worker"
+        return "Inspector Lần 1" if self.is_reviewer else "Worker"
 
     @property
     def frame_per_hour(self) -> float:
@@ -1275,7 +1286,7 @@ class AggregatedRow:
     def status_dates_summary(self) -> str:
         parts = []
         if self.mismatch_dates:
-            parts.append(f"Lệch: {self.mismatch_dates_str}")
+            parts.append(f"Không khớp: {self.mismatch_dates_str}")
         no_rw_dates = sorted({d.date for d in self.pending_diffs if not d.is_missing_bbox})
         miss_bb_dates = sorted({d.date for d in self.pending_diffs if d.is_missing_bbox})
         if no_rw_dates:
@@ -1425,7 +1436,7 @@ class ReviewerDiffRecord:
     def frame_range_display(self) -> str:
         parts = []
         if self.wl_range:
-            parts.append(f"WL Rev:{self.wl_range}")
+            parts.append(f"WL Inspector: {self.wl_range}")
         if self.rw_range and self.rw_range != self.wl_range:
             parts.append(f"RW:{self.rw_range}")
         if self.ann_range and self.ann_range != self.wl_range:
@@ -1483,7 +1494,7 @@ class ReviewerAuditSummaryRow:
         m_dates = sorted({d.date for d in self.real_diffs})
         p_dates = sorted({d.date for d in self.pending_diffs})
         if m_dates:
-            parts.append("Lệch: " + ", ".join(d.strftime("%m/%d") for d in m_dates))
+            parts.append("Không khớp: " + ", ".join(d.strftime("%m/%d") for d in m_dates))
         if p_dates:
             parts.append("Chưa có Review: " + ", ".join(d.strftime("%m/%d") for d in p_dates))
         return " | ".join(parts)
@@ -1835,6 +1846,7 @@ def _match_blocks_with_frame_ranges(
                 rw_bbox=matched_single.bbox,
                 wl_cells=wl_loc,
                 rw_rows=_format_rw_locs([matched_single]),
+                inspectors=unique_inspector_names([matched_single.inspector]),
                 reason=diff_reason,
                 kind=diff_kind,
                 job_id=wb.job_id or matched_single.job_id,
@@ -1920,6 +1932,7 @@ def _match_blocks_with_frame_ranges(
                 rw_bbox=sum_bb,
                 wl_cells=wl_loc,
                 rw_rows=_format_rw_locs(overlaps),
+                inspectors=unique_inspector_names(record.inspector for record in overlaps),
                 reason=reason,
                 kind=diff_kind,
                 job_id=wb.job_id or overlaps[0].job_id,
@@ -1966,6 +1979,7 @@ def _match_blocks_with_frame_ranges(
                     rw_bbox=sj_match.bbox,
                     wl_cells=wl_loc,
                     rw_rows=_format_rw_locs([sj_match]),
+                    inspectors=unique_inspector_names([sj_match.inspector]),
                     reason=reason,
                     kind="mismatch",
                     job_id=wb.job_id,
@@ -2000,6 +2014,7 @@ def _match_blocks_with_frame_ranges(
                     rw_bbox=sum_bb,
                     wl_cells=wl_loc,
                     rw_rows=_format_rw_locs(job_matches),
+                    inspectors=unique_inspector_names(record.inspector for record in job_matches),
                     reason=diff_reason,
                     kind=diff_kind,
                     job_id=wb.job_id,
@@ -2063,6 +2078,7 @@ def _match_blocks_with_frame_ranges(
                     rw_bbox=r.bbox,
                     wl_cells="",
                     rw_rows=_format_rw_locs([r]),
+                    inspectors=unique_inspector_names([r.inspector]),
                     reason=rw_issue,
                     kind="mismatch",
                     job_id=r.job_id,
@@ -2192,7 +2208,7 @@ def _build_reviewer_audit(
                 frame_wrong = True
                 ann_lbl = next((s.assignee_raw for s in rec_segs if set(s.assignee_keys) & ann_keys), "")
                 issues.append(
-                    f"Sai Frame WL Reviewer: Job {wb_blk.job_id} ({_seg_range(rec_segs)}) của {ann_lbl} đúng, "
+                    f"Sai Frame WL Inspector: Job {wb_blk.job_id} ({_seg_range(rec_segs)}) của {ann_lbl} đúng, "
                     f"nhưng ghi frame {sf}~{ef}"
                     + (f" (thuộc Job {owner.job_id})" if owner is not None else "")
                     + f" [{task_lbl}]"
@@ -2200,13 +2216,13 @@ def _build_reviewer_audit(
             elif owner is not None and owner.job_id != wb_blk.job_id:
                 rec_txt = f"{wb_blk.job_id} ({_seg_range(rec_segs)})" if rec_segs else f"{wb_blk.job_id or '(trống)'} (không có trong task)"
                 issues.append(
-                    f"Sai ID Job WL Reviewer: ghi {rec_txt}, frame {sf}~{ef} thuộc Job {owner.job_id} "
+                    f"Sai ID Job WL Inspector: ghi {rec_txt}, frame {sf}~{ef} thuộc Job {owner.job_id} "
                     f"({owner.start_frame}~{owner.end_frame}) [{task_lbl}]"
                 )
             elif rec_segs:
                 frame_wrong = True
                 issues.append(
-                    f"Sai Frame WL Reviewer: Job {wb_blk.job_id} có frame {_seg_range(rec_segs)}, đang ghi {sf}~{ef} [{task_lbl}]"
+                    f"Sai Frame WL Inspector: Job {wb_blk.job_id} có frame {_seg_range(rec_segs)}, đang ghi {sf}~{ef} [{task_lbl}]"
                 )
             elif owner is None:
                 issues.append(f"Frame {sf}~{ef} không thuộc Job nào trong task [{task_lbl}]")
@@ -2222,7 +2238,7 @@ def _build_reviewer_audit(
             if wb_tn and dist_tn and wb_tn != dist_tn and wb_tn_nopfx != dist_tn and dist_tn not in wb_tn and wb_tn not in dist_tn:
                 raw_first = str(wb_blk.job_name).splitlines()[0].strip()
                 issues.append(
-                    f"Sai Task Name WL Reviewer: ghi '{raw_first}', đúng là '{task_lbl}' (Job {wb_blk.job_id})"
+                    f"Sai Task Name WL Inspector: ghi '{raw_first}', đúng là '{task_lbl}' (Job {wb_blk.job_id})"
                 )
 
         return issues
@@ -2459,7 +2475,7 @@ def _build_reviewer_audit(
                 wl_cells="",
                 rw_rows=_format_rw_locs([rec]),
                 ann_cells="",
-                reason="Có bên Review nhưng chưa ghi Work Log Reviewer",
+                reason="Có bên Review nhưng chưa ghi Work Log Inspector",
                 kind="pending_rework",
             ))
 

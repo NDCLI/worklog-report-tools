@@ -1,9 +1,11 @@
 from collections import Counter
+from typing import List, Optional
+
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from data_engine import ReportResult
+from data_engine import InspectorSummary, ReportResult
 
 
 DARK_HEADER_FILL = PatternFill(start_color="333333", end_color="333333", fill_type="solid")
@@ -297,8 +299,8 @@ def _write_template2_by_annotator(wb: openpyxl.Workbook, report: ReportResult, h
     ws.freeze_panes = "B3"
 
 
-def _write_reviewer_sheet(wb: openpyxl.Workbook, report: ReportResult):
-    ws = wb.create_sheet(title="Reviewer")
+def _write_inspector_sheet(wb: openpyxl.Workbook, report: ReportResult, groups: List[InspectorSummary]):
+    ws = wb.create_sheet(title="Inspector")
     ws.views.sheetView[0].showGridLines = True
 
     title_text = f"{report.start_date.strftime('%Y.%m.%d')} ~ {report.end_date.strftime('%Y.%m.%d')}"
@@ -345,7 +347,7 @@ def _write_reviewer_sheet(wb: openpyxl.Workbook, report: ReportResult):
         )
 
     cur_row = 3
-    for grp in report.inspector_groups:
+    for grp in groups:
         start_r = cur_row
         end_r = cur_row + len(grp.rows) - 1
         for idx, rdata in enumerate(grp.rows):
@@ -448,9 +450,11 @@ def _write_ranking_sheet(wb: openpyxl.Workbook, report: ReportResult):
 
     def write_rank_block(start_row: int, title: str, name_hdr: str, rows_list, is_rev: bool = False) -> int:
         ws.merge_cells(start_row=start_row, start_column=1, end_row=start_row, end_column=4)
-        ws.cell(start_row, 1, title)
-        ws.cell(start_row, 1).font = FONT_AUDIT_HDR
-        ws.row_dimensions[start_row].height = 24
+        title_cell = ws.cell(start_row, 1, title)
+        title_cell.font = FONT_AUDIT_HDR
+        if is_rev:
+            title_cell.alignment = ALIGN_LEFT
+        ws.row_dimensions[start_row].height = 36 if is_rev else 24
         for c in range(1, 5):
             ws.cell(start_row, c).fill = DARK_HEADER_FILL
 
@@ -506,8 +510,9 @@ def _write_ranking_sheet(wb: openpyxl.Workbook, report: ReportResult):
     )
     write_rank_block(
         next_r,
-        f"BẢNG XẾP HẠNG REVIEWER (LẦN 1) — TỈ LỆ LỖI THẤP NHẤT ({report.start_date.strftime('%Y.%m.%d')} ~ {report.end_date.strftime('%Y.%m.%d')})",
-        "Reviewer (Lần 1)",
+        f"BẢNG XẾP HẠNG INSPECTOR (LẦN 1) — {report.start_date:%Y.%m.%d} ~ {report.end_date:%Y.%m.%d}\n"
+        "Tỉ lệ lỗi thấp nhất theo Annotator đang chọn",
+        "Inspector (Lần 1)",
         reviewers,
         is_rev=True,
     )
@@ -552,7 +557,7 @@ def _write_audit_and_notes_sheet(wb: openpyxl.Workbook, report: ReportResult):
         ws.row_dimensions[cur_row].height = 20
         sk = rdata.status_kind
         if sk == "mismatch":
-            status = "⚠ LỆCH DATA"
+            status = "⚠ KHÔNG KHỚP"
         elif sk == "pending":
             only_miss_bb = bool(rdata.pending_diffs) and all(d.is_missing_bbox for d in rdata.pending_diffs)
             status = "⏳ Chưa nhập BBOX" if only_miss_bb else "⏳ Chưa có data"
@@ -598,7 +603,7 @@ def _write_audit_and_notes_sheet(wb: openpyxl.Workbook, report: ReportResult):
         ws.merge_cells(start_row=cur_row, start_column=1, end_row=cur_row, end_column=13)
         ws.cell(
             cur_row, 1,
-            f"CHI TIẾT ĐỐI CHIẾU THEO FRAME START/END: {real_cnt} BLOCK LỆCH DATA · {pend_cnt} BLOCK CHƯA CÓ DATA / BBOX"
+            f"CHI TIẾT ĐỐI CHIẾU THEO FRAME START/END: {real_cnt} BLOCK KHÔNG KHỚP · {pend_cnt} BLOCK CHƯA CÓ DATA / BBOX"
         ).font = FONT_AUDIT_HDR
         for c in range(1, 14):
             ws.cell(cur_row, c).fill = DARK_HEADER_FILL
@@ -632,7 +637,7 @@ def _write_audit_and_notes_sheet(wb: openpyxl.Workbook, report: ReportResult):
             elif d.is_job_id_mismatch:
                 kind_lbl = "⚠ SAI ID JOB"
             else:
-                kind_lbl = "⚠ LỆCH DATA"
+                kind_lbl = "⚠ KHÔNG KHỚP"
             row_fill = INFO_FILL if is_pend else WARN_FILL
             accent_font = FONT_INFO if is_pend else FONT_WARN
             miss_rw_bb = (d.rw_frames > 0 and d.wl_bbox > 0 and d.rw_bbox <= 0)
@@ -710,6 +715,7 @@ def export_report_to_excel(
     include_ranking: bool = True,
     include_audit: bool = True,
     highlight_mismatch: bool = True,
+    inspector_groups: Optional[List[InspectorSummary]] = None,
 ):
     wb = openpyxl.Workbook()
     default_ws = wb.active
@@ -723,7 +729,8 @@ def export_report_to_excel(
         _write_template2_by_annotator(wb, report, highlight_mismatch=highlight_mismatch)
 
     if include_reviewer:
-        _write_reviewer_sheet(wb, report)
+        groups = report.inspector_groups if inspector_groups is None else inspector_groups
+        _write_inspector_sheet(wb, report, groups)
 
     if include_ranking:
         _write_ranking_sheet(wb, report)
