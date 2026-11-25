@@ -590,14 +590,14 @@ def _write_ranking_sheet(wb: openpyxl.Workbook, report: ReportResult):
     r_perf = _score_perf(reviewers, lambda g: g.total_work_load, lambda g: g.total_work_bbox, lambda g: g.err_rate_frame)
     next_r = write_perf_block(
         next_r,
-        f"HIỆU SUẤT ANNOTATOR — LỖI THẤP & SẢN LƯỢNG NHIỀU ({report.start_date.strftime('%Y.%m.%d')} ~ {report.end_date.strftime('%Y.%m.%d')})",
+        f"HIỆU SUẤT ANNOTATOR — TỈ LỆ LỖI THẤP & SẢN LƯỢNG CAO ({report.start_date.strftime('%Y.%m.%d')} ~ {report.end_date.strftime('%Y.%m.%d')})",
         "Annotator (Worker)",
         w_perf,
         is_rev=False,
     )
     write_perf_block(
         next_r,
-        f"HIỆU SUẤT INSPECTOR — LỖI THẤP & SẢN LƯỢNG NHIỀU ({report.start_date.strftime('%Y.%m.%d')} ~ {report.end_date.strftime('%Y.%m.%d')})",
+        f"HIỆU SUẤT INSPECTOR — TỈ LỆ LỖI THẤP & SẢN LƯỢNG CAO ({report.start_date.strftime('%Y.%m.%d')} ~ {report.end_date.strftime('%Y.%m.%d')})",
         "Inspector (Lần 1)",
         r_perf,
         is_rev=True,

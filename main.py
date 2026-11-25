@@ -87,7 +87,7 @@ from updater import (
 
 
 APP_NAME = "Annotator & Inspector Report"
-APP_VERSION = "2.8"
+APP_VERSION = "2.9"
 
 DEFAULT_SP_WL_URL = (
     "https://hanwhaworkplace.sharepoint.com/:x:/r/sites/HVV-AILabAnnotation/"
@@ -843,9 +843,17 @@ class MainWindow(QMainWindow):
         self.tbl_rev.cellDoubleClicked.connect(lambda r, _c: self._on_rank_double_click(self.tbl_rev, r))
         self.tabs.addTab(self.tbl_rev, "Inspector")
 
-        # Tab 4: Bảng Xếp Hạng (Lowest Frame Error Rate Ranking for Workers & 1st Inspectors)
+        # Tab 4: Bảng Xếp Hạng (2 sub-tabs: Tỉ lệ lỗi Frame (%) & Hiệu suất lỗi thấp + sản lượng nhiều)
         self.tab_rank = QWidget()
-        rank_lay = QVBoxLayout(self.tab_rank)
+        rank_root_lay = QVBoxLayout(self.tab_rank)
+        rank_root_lay.setContentsMargins(10, 10, 10, 10)
+        rank_root_lay.setSpacing(8)
+
+        self.rank_mode_tabs = QTabWidget()
+
+        # Sub-tab 0: Tỉ lệ lỗi Frame (%)
+        page_rank_err = QWidget()
+        rank_lay = QVBoxLayout(page_rank_err)
         rank_lay.setContentsMargins(10, 10, 10, 10)
         rank_lay.setSpacing(8)
 
@@ -886,16 +894,16 @@ class MainWindow(QMainWindow):
 
         rank_split.setSizes([600, 600])
         rank_lay.addWidget(rank_split, 1)
-        self.tabs.addTab(self.tab_rank, "Bảng Xếp Hạng")
+        self.rank_mode_tabs.addTab(page_rank_err, "Tỉ lệ lỗi Frame (%)")
 
-        # Tab 5: Hiệu suất (Tỉ lệ lỗi Frame thấp & Sản lượng nhiều)
-        self.tab_perf = QWidget()
-        perf_lay = QVBoxLayout(self.tab_perf)
+        # Sub-tab 1: Hiệu suất (Tỉ lệ lỗi Frame thấp & Sản lượng nhiều)
+        page_rank_perf = QWidget()
+        perf_lay = QVBoxLayout(page_rank_perf)
         perf_lay.setContentsMargins(10, 10, 10, 10)
         perf_lay.setSpacing(8)
 
         perf_top = QHBoxLayout()
-        lbl_pf_info = QLabel("⭐ Xếp hạng Hiệu suất: Tỉ lệ lỗi thấp & Sản lượng nhiều (Thang 100 điểm)")
+        lbl_pf_info = QLabel("⭐ Xếp hạng Hiệu suất: Tỉ lệ lỗi thấp & Sản lượng cao (Thang 100 điểm)")
         lbl_pf_info.setStyleSheet("font-weight: 700; font-size: 12.5px;")
         lbl_pf_info.setToolTip(
             "Điểm Tổng = (Trọng số Chất lượng × Điểm lỗi Frame thấp) + (Trọng số Sản lượng × Điểm sản lượng Frame & BBOX)"
@@ -943,7 +951,10 @@ class MainWindow(QMainWindow):
 
         perf_split.setSizes([600, 600])
         perf_lay.addWidget(perf_split, 1)
-        self.tabs.addTab(self.tab_perf, "Hiệu suất")
+        self.rank_mode_tabs.addTab(page_rank_perf, "Hiệu suất")
+
+        rank_root_lay.addWidget(self.rank_mode_tabs)
+        self.tabs.addTab(self.tab_rank, "Bảng Xếp Hạng")
 
         # Tab 6: Kiểm tra dữ liệu (2 sub-tabs: Check Annotator & Check Inspector)
         self.tab_audit = QWidget()
@@ -2602,8 +2613,8 @@ class MainWindow(QMainWindow):
             reviewers_raw, lambda g: g.total_work_load, lambda g: g.total_work_bbox, lambda g: g.err_rate_frame, w_err, w_vol
         )
 
-        self.lbl_perf_worker.setText(f"⭐ Hiệu suất Annotator / Worker ({len(w_scored)} người — Lỗi thấp & Sản lượng nhiều)")
-        self.lbl_perf_reviewer.setText(f"⭐ Hiệu suất Inspector Lần 1 ({len(r_scored)} người — Lỗi thấp & Sản lượng nhiều)")
+        self.lbl_perf_worker.setText(f"⭐ Hiệu suất Annotator / Worker ({len(w_scored)} người — Tỉ lệ lỗi thấp & Sản lượng cao)")
+        self.lbl_perf_reviewer.setText(f"⭐ Hiệu suất Inspector Lần 1 ({len(r_scored)} người — Tỉ lệ lỗi thấp & Sản lượng cao)")
 
         medals = {1: "🥇 1", 2: "🥈 2", 3: "🥉 3"}
 
@@ -2908,9 +2919,10 @@ class MainWindow(QMainWindow):
         elif cur_w is self.tbl_rev:
             tbl = self.tbl_rev
         elif cur_w is self.tab_rank:
-            tbl = self.tbl_rank_reviewer if self.tbl_rank_reviewer.hasFocus() else self.tbl_rank_worker
-        elif cur_w is self.tab_perf:
-            tbl = self.tbl_perf_reviewer if self.tbl_perf_reviewer.hasFocus() else self.tbl_perf_worker
+            if self.rank_mode_tabs.currentIndex() == 1:
+                tbl = self.tbl_perf_reviewer if self.tbl_perf_reviewer.hasFocus() else self.tbl_perf_worker
+            else:
+                tbl = self.tbl_rank_reviewer if self.tbl_rank_reviewer.hasFocus() else self.tbl_rank_worker
         else:
             if self.audit_mode_tabs.currentIndex() == 1:
                 summary, details = self.tbl_rev_audit, self.tbl_rev_diffs
