@@ -1786,181 +1786,258 @@ def _match_blocks_with_frame_ranges(
         if r.frames > 0 or r.bbox > 0 or (r.start_frame is not None and r.end_frame is not None):
             rw_by_wt[(r.worker_key, r.task)].append(r)
 
-    # Index ALL Work_log blocks by (annotator_key, task) (for N-to-1 merge checks)
+    # Index ALL Work_log blocks by (annotator_key, task) (for cross-date reservation & N-to-1 merge checks)
     wl_all_by_wt: Dict[Tuple[str, str], List[WorklogBlockRecord]] = defaultdict(list)
     wl_in_range: List[WorklogBlockRecord] = []
+    wl_outside: List[WorklogBlockRecord] = []
     for wb in ds.worklog_blocks:
         if selected_annotators is not None and wb.annotator_key not in selected_annotators:
             continue
         wl_all_by_wt[(wb.annotator_key, wb.task)].append(wb)
         if start_date <= wb.date <= end_date:
             wl_in_range.append(wb)
+        else:
+            wl_outside.append(wb)
 
-    for wb in wl_in_range:
+    def _exact_match_score(wb: WorklogBlockRecord, c: ReworkRecord, reserved_ids: set) -> Tuple[int, int, int, int, int]:
+        """Rank exact-range Review candidates strictly by content (unused, Job ID, Frames/BBOX from Note); never require matching dates."""
+        if id(c) in matched_rw_ids:
+            used_pen = 2
+        elif id(c) in reserved_ids:
+            used_pen = 1
+        else:
+            used_pen = 0
+        job_pen = 0 if (wb.job_id and c.job_id and c.job_id == wb.job_id) else (1 if (not wb.job_id or not c.job_id) else 2)
+        same_fr = abs(c.frames - wb.frames) <= 1e-6
+        same_bb = (wb.bbox > 0 and c.bbox > 0 and abs(c.bbox - wb.bbox) <= 1e-6)
+        if same_fr and (same_bb or wb.bbox == 0 or c.bbox == 0):
+            val_pen = 0 if same_bb else 1
+        elif same_fr:
+            val_pen = 2
+        else:
+            val_pen = 3
+        # Final tie-breaker only for completely identical duplicates: prefer review on/after worklog date
+        d_ref = c.date_inspect or c.date_work
+        order_pen = 0 if (d_ref is not None and d_ref >= wb.date) else 1
+        return (used_pen, job_pen, val_pen, order_pen, c.row_num)
+
+    # Pass 0: Pre-reserve Review records that ALREADY exactly match Work_log blocks OUTSIDE [start_date, end_date].
+    # Prevents a block in the current period (e.g. 11/25 184~190) from stealing a Review row written on 11/25
+    # that actually reviewed an earlier day's Work_log block (e.g. 11/21 177~183)!
+    reserved_rw_ids: set = set()
+    for wb_out in wl_outside:
+        if wb_out.start_frame is None or wb_out.end_frame is None:
+            continue
+        wt_key = (wb_out.annotator_key, wb_out.task)
+        cands = rw_by_wt.get(wt_key, [])
+        exact = [
+            c for c in cands
+            if id(c) not in reserved_rw_ids
+            and c.start_frame == wb_out.start_frame and c.end_frame == wb_out.end_frame
+            and (not wb_out.job_id or not c.job_id or c.job_id == wb_out.job_id)
+        ]
+        if exact:
+            best = min(exact, key=lambda c: _exact_match_score(wb_out, c, reserved_rw_ids))
+            reserved_rw_ids.add(id(best))
+            continue
+        # Also reserve exact 1-to-N splits belonging strictly to wb_out
+        if wb_out.job_id:
+            splits = [
+                c for c in cands
+                if id(c) not in reserved_rw_ids
+                and c.job_id == wb_out.job_id
+                and c.start_frame is not None and c.end_frame is not None
+                and c.start_frame >= wb_out.start_frame and c.end_frame <= wb_out.end_frame
+            ]
+            if splits:
+                s_min = min(c.start_frame for c in splits)
+                s_max = max(c.end_frame for c in splits)
+                if s_min == wb_out.start_frame and s_max == wb_out.end_frame:
+                    for c in splits:
+                        reserved_rw_ids.add(id(c))
+
+    resolved_wb_indices: set = set()
+
+    # Pass 1: Exact Start/End Frame matches across ALL in-range Work_log blocks first
+    # (so an unreviewed block earlier in the list can NEVER steal another block's exact match).
+    for idx_wb, wb in enumerate(wl_in_range):
+        if wb.start_frame is None or wb.end_frame is None:
+            continue
+        wt_key = (wb.annotator_key, wb.task)
+        cands = rw_by_wt.get(wt_key, [])
+        exact = [
+            c for c in cands
+            if c.start_frame == wb.start_frame and c.end_frame == wb.end_frame
+            and (not wb.job_id or not c.job_id or c.job_id == wb.job_id)
+        ]
+        if not exact:
+            exact = [c for c in cands if c.start_frame == wb.start_frame and c.end_frame == wb.end_frame]
+        if not exact:
+            continue
+
+        matched_single = min(exact, key=lambda c: _exact_match_score(wb, c, reserved_rw_ids))
+        resolved_wb_indices.add(idx_wb)
+        _consume_rw(wt_key, [matched_single])
+
+        wl_rng = _fmt_range(wb.start_frame, wb.end_frame)
+        wl_loc = f"{wb.sheet_name}!{wb.cell_ref}"
+        job_err = _check_dist_job_ids(wb, [matched_single])
+        exact_vals = abs(matched_single.frames - wb.frames) <= 1e-6 and abs(matched_single.bbox - wb.bbox) <= 1e-6
+        if exact_vals and not job_err:
+            continue  # 100% exact match regardless of review date!
+        if exact_vals:
+            diff_kind, diff_reason = "mismatch", job_err
+        else:
+            diff_kind, diff_reason = _classify_daily_diff(wb.frames, matched_single.frames, wb.bbox, matched_single.bbox)
+            if job_err:
+                diff_kind = "mismatch"
+                diff_reason = f"{diff_reason} | {job_err}"
+        diffs_by_ann_task[wt_key].append(DailyDiffRecord(
+            date=wb.date,
+            rw_date=matched_single.date_inspect or matched_single.date_work,
+            task=wb.task,
+            annotator_key=wb.annotator_key,
+            annotator=wb.annotator_display,
+            wl_frames=wb.frames,
+            rw_frames=matched_single.frames,
+            wl_bbox=wb.bbox,
+            rw_bbox=matched_single.bbox,
+            wl_cells=wl_loc,
+            rw_rows=_format_rw_locs([matched_single]),
+            inspectors=unique_inspector_names([matched_single.inspector]),
+            reason=diff_reason,
+            kind=diff_kind,
+            job_id=wb.job_id or matched_single.job_id,
+            wl_range=wl_rng,
+            rw_range=_fmt_range(matched_single.start_frame, matched_single.end_frame),
+        ))
+
+    # Pass 2: Overlapping Start/End Frame matches for remaining unresolved Work_log blocks (NO date cutoff)
+    for idx_wb, wb in enumerate(wl_in_range):
+        if idx_wb in resolved_wb_indices or wb.start_frame is None or wb.end_frame is None:
+            continue
+        wt_key = (wb.annotator_key, wb.task)
+        cands = rw_by_wt.get(wt_key, [])
+        overlaps: List[ReworkRecord] = []
+        for c in cands:
+            if c.start_frame is None or c.end_frame is None:
+                continue
+            if max(wb.start_frame, c.start_frame) > min(wb.end_frame, c.end_frame):
+                continue
+            if wb.job_id and c.job_id and wb.job_id != c.job_id:
+                continue
+            # Skip Review rows already claimed as an exact match by another block,
+            # unless this Review row strictly encloses wb (N-to-1 merge across multiple WL blocks).
+            is_enclosing_merge = (c.start_frame <= wb.start_frame and c.end_frame >= wb.end_frame and (c.start_frame < wb.start_frame or c.end_frame > wb.end_frame))
+            if (id(c) in matched_rw_ids or id(c) in reserved_rw_ids) and not is_enclosing_merge:
+                continue
+            overlaps.append(c)
+
+        if not overlaps:
+            continue
+
+        resolved_wb_indices.add(idx_wb)
+        _consume_rw(wt_key, overlaps)
+        wl_rng = _fmt_range(wb.start_frame, wb.end_frame)
+        wl_loc = f"{wb.sheet_name}!{wb.cell_ref}"
+        sum_fr = sum(c.frames for c in overlaps)
+        sum_bb = sum(c.bbox for c in overlaps)
+        min_sf = min(c.start_frame for c in overlaps if c.start_frame is not None)
+        max_ef = max(c.end_frame for c in overlaps if c.end_frame is not None)
+        job_err = _check_dist_job_ids(wb, overlaps)
+
+        # Check 1-to-N split exact match (1 WL block split into multiple RW rows)
+        is_exact_overlap = (
+            min_sf == wb.start_frame and max_ef == wb.end_frame
+            and abs(sum_fr - wb.frames) <= 1e-6 and abs(sum_bb - wb.bbox) <= 1e-6
+        )
+        if is_exact_overlap and not job_err:
+            continue
+
+        # Check N-to-1 merge exact match (multiple WL blocks merged into 1 RW row)
+        if not is_exact_overlap and len(overlaps) == 1:
+            rw_one = overlaps[0]
+            if rw_one.start_frame is not None and rw_one.end_frame is not None:
+                sibs = [
+                    s for s in wl_all_by_wt.get(wt_key, [])
+                    if s.start_frame is not None and s.end_frame is not None
+                    and (not s.job_id or not rw_one.job_id or s.job_id == rw_one.job_id)
+                    and max(s.start_frame, rw_one.start_frame) <= min(s.end_frame, rw_one.end_frame)
+                ]
+                if len(sibs) > 1:
+                    s_min = min(s.start_frame for s in sibs)
+                    s_max = max(s.end_frame for s in sibs)
+                    s_fr = sum(s.frames for s in sibs)
+                    s_bb = sum(s.bbox for s in sibs)
+                    if s_min == rw_one.start_frame and s_max == rw_one.end_frame and abs(s_fr - rw_one.frames) <= 1e-6 and abs(s_bb - rw_one.bbox) <= 1e-6:
+                        if not job_err:
+                            continue
+                        is_exact_overlap = True
+
+        rw_rng = _fmt_range(min_sf, max_ef)
+        if is_exact_overlap and job_err:
+            diff_kind = "mismatch"
+            reason = job_err
+        elif min_sf != wb.start_frame or max_ef != wb.end_frame:
+            diff_kind = "mismatch"
+            reason = f"Lệch Frame Start/End (Work Log {wl_rng} ≠ Review {rw_rng})"
+            if job_err:
+                reason = f"{reason} | {job_err}"
+        else:
+            diff_kind, reason = _classify_daily_diff(wb.frames, sum_fr, wb.bbox, sum_bb)
+            if job_err:
+                diff_kind = "mismatch"
+                reason = f"{reason} | {job_err}"
+        rw_dt = min((c.date_inspect or c.date_work for c in overlaps if (c.date_inspect or c.date_work)), default=None)
+        diffs_by_ann_task[wt_key].append(DailyDiffRecord(
+            date=wb.date,
+            rw_date=rw_dt,
+            task=wb.task,
+            annotator_key=wb.annotator_key,
+            annotator=wb.annotator_display,
+            wl_frames=wb.frames,
+            rw_frames=sum_fr,
+            wl_bbox=wb.bbox,
+            rw_bbox=sum_bb,
+            wl_cells=wl_loc,
+            rw_rows=_format_rw_locs(overlaps),
+            inspectors=unique_inspector_names(record.inspector for record in overlaps),
+            reason=reason,
+            kind=diff_kind,
+            job_id=wb.job_id or overlaps[0].job_id,
+            wl_range=wl_rng,
+            rw_range=rw_rng,
+        ))
+
+    # Pass 2.5 & 3 & 4: Remaining unresolved Work_log blocks
+    for idx_wb, wb in enumerate(wl_in_range):
+        if idx_wb in resolved_wb_indices:
+            continue
         wt_key = (wb.annotator_key, wb.task)
         cands = rw_by_wt.get(wt_key, [])
         wl_rng = _fmt_range(wb.start_frame, wb.end_frame)
         wl_loc = f"{wb.sheet_name}!{wb.cell_ref}"
 
-        # 1. Exact Start/End Frame match (prefer matching Job ID + unused record)
-        matched_single: Optional[ReworkRecord] = None
-        if wb.start_frame is not None and wb.end_frame is not None:
-            exact = [
+        # 2.5. Strict typo-recovery when Start/End Frame has a typo (e.g. Review typed 23000~23049 instead of 33000~33049):
+        # MUST match unused & unreserved Review row on SAME (Annotator, Task, Job ID, Frames) AND exact BBOX from Work Log Note!
+        # Never steals a Review row belonging to another day's Work Log block, and never uses date as a match filter.
+        if wb.start_frame is not None and wb.end_frame is not None and wb.job_id and wb.frames > 0 and wb.bbox > 0:
+            same_job_cands = [
                 c for c in cands
-                if c.start_frame == wb.start_frame and c.end_frame == wb.end_frame
-                and (not wb.job_id or not c.job_id or c.job_id == wb.job_id)
+                if id(c) not in matched_rw_ids
+                and id(c) not in reserved_rw_ids
+                and c.job_id == wb.job_id
+                and abs(c.frames - wb.frames) <= 1e-6
+                and c.bbox > 0 and abs(c.bbox - wb.bbox) <= 1e-6
             ]
-            if not exact:
-                exact = [c for c in cands if c.start_frame == wb.start_frame and c.end_frame == wb.end_frame]
-            if exact:
-                def _score(c: ReworkRecord) -> Tuple[int, int, int]:
-                    used_pen = 1 if id(c) in matched_rw_ids else 0
-                    val_pen = 0 if (abs(c.frames - wb.frames) <= 1e-6 and abs(c.bbox - wb.bbox) <= 1e-6) else 1
-                    d_ref = c.date_work or c.date_inspect
-                    dist = abs((d_ref - wb.date).days) if d_ref else 0
-                    return (used_pen, val_pen, dist)
-                matched_single = min(exact, key=_score)
-
-        if matched_single is not None:
-            _consume_rw(wt_key, [matched_single])
-            job_err = _check_dist_job_ids(wb, [matched_single])
-            exact_vals = abs(matched_single.frames - wb.frames) <= 1e-6 and abs(matched_single.bbox - wb.bbox) <= 1e-6
-            if exact_vals and not job_err:
-                continue  # 100% exact match regardless of review date!
-            if exact_vals:
-                diff_kind, diff_reason = "mismatch", job_err
-            else:
-                diff_kind, diff_reason = _classify_daily_diff(wb.frames, matched_single.frames, wb.bbox, matched_single.bbox)
-                if job_err:
-                    diff_kind = "mismatch"
-                    diff_reason = f"{diff_reason} | {job_err}"
-            diffs_by_ann_task[wt_key].append(DailyDiffRecord(
-                date=wb.date,
-                rw_date=matched_single.date_inspect or matched_single.date_work,
-                task=wb.task,
-                annotator_key=wb.annotator_key,
-                annotator=wb.annotator_display,
-                wl_frames=wb.frames,
-                rw_frames=matched_single.frames,
-                wl_bbox=wb.bbox,
-                rw_bbox=matched_single.bbox,
-                wl_cells=wl_loc,
-                rw_rows=_format_rw_locs([matched_single]),
-                inspectors=unique_inspector_names([matched_single.inspector]),
-                reason=diff_reason,
-                kind=diff_kind,
-                job_id=wb.job_id or matched_single.job_id,
-                wl_range=wl_rng,
-                rw_range=_fmt_range(matched_single.start_frame, matched_single.end_frame),
-            ))
-            continue
-
-        # 2. Overlapping Start/End Frame match (same Job ID, or overlapping range when Job ID is missing)
-        overlaps: List[ReworkRecord] = []
-        if wb.start_frame is not None and wb.end_frame is not None:
-            for c in cands:
-                if c.start_frame is not None and c.end_frame is not None:
-                    if max(wb.start_frame, c.start_frame) <= min(wb.end_frame, c.end_frame):
-                        if wb.job_id and c.job_id:
-                            if wb.job_id == c.job_id:
-                                overlaps.append(c)
-                        else:
-                            d_ref = c.date_work or c.date_inspect
-                            if d_ref is None or abs((d_ref - wb.date).days) <= 14:
-                                overlaps.append(c)
-
-        if overlaps:
-            _consume_rw(wt_key, overlaps)
-            sum_fr = sum(c.frames for c in overlaps)
-            sum_bb = sum(c.bbox for c in overlaps)
-            min_sf = min(c.start_frame for c in overlaps if c.start_frame is not None)
-            max_ef = max(c.end_frame for c in overlaps if c.end_frame is not None)
-            job_err = _check_dist_job_ids(wb, overlaps)
-
-            # Check 1-to-N split exact match (1 WL block split into multiple RW rows)
-            is_exact_overlap = (
-                min_sf == wb.start_frame and max_ef == wb.end_frame
-                and abs(sum_fr - wb.frames) <= 1e-6 and abs(sum_bb - wb.bbox) <= 1e-6
-            )
-            if is_exact_overlap and not job_err:
-                continue
-
-            # Check N-to-1 merge exact match (multiple WL blocks merged into 1 RW row)
-            if not is_exact_overlap and len(overlaps) == 1:
-                rw_one = overlaps[0]
-                if rw_one.start_frame is not None and rw_one.end_frame is not None:
-                    sibs = [
-                        s for s in wl_all_by_wt.get(wt_key, [])
-                        if s.start_frame is not None and s.end_frame is not None
-                        and (not s.job_id or not rw_one.job_id or s.job_id == rw_one.job_id)
-                        and max(s.start_frame, rw_one.start_frame) <= min(s.end_frame, rw_one.end_frame)
-                    ]
-                    if len(sibs) > 1:
-                        s_min = min(s.start_frame for s in sibs)
-                        s_max = max(s.end_frame for s in sibs)
-                        s_fr = sum(s.frames for s in sibs)
-                        s_bb = sum(s.bbox for s in sibs)
-                        if s_min == rw_one.start_frame and s_max == rw_one.end_frame and abs(s_fr - rw_one.frames) <= 1e-6 and abs(s_bb - rw_one.bbox) <= 1e-6:
-                            if not job_err:
-                                continue
-                            is_exact_overlap = True
-
-            rw_rng = _fmt_range(min_sf, max_ef)
-            if is_exact_overlap and job_err:
-                diff_kind = "mismatch"
-                reason = job_err
-            elif min_sf != wb.start_frame or max_ef != wb.end_frame:
-                diff_kind = "mismatch"
-                reason = f"Lệch Frame Start/End (Work Log {wl_rng} ≠ Review {rw_rng})"
-                if job_err:
-                    reason = f"{reason} | {job_err}"
-            else:
-                diff_kind, reason = _classify_daily_diff(wb.frames, sum_fr, wb.bbox, sum_bb)
-                if job_err:
-                    diff_kind = "mismatch"
-                    reason = f"{reason} | {job_err}"
-            rw_dt = min((c.date_inspect or c.date_work for c in overlaps if (c.date_inspect or c.date_work)), default=None)
-            diffs_by_ann_task[wt_key].append(DailyDiffRecord(
-                date=wb.date,
-                rw_date=rw_dt,
-                task=wb.task,
-                annotator_key=wb.annotator_key,
-                annotator=wb.annotator_display,
-                wl_frames=wb.frames,
-                rw_frames=sum_fr,
-                wl_bbox=wb.bbox,
-                rw_bbox=sum_bb,
-                wl_cells=wl_loc,
-                rw_rows=_format_rw_locs(overlaps),
-                inspectors=unique_inspector_names(record.inspector for record in overlaps),
-                reason=reason,
-                kind=diff_kind,
-                job_id=wb.job_id or overlaps[0].job_id,
-                wl_range=wl_rng,
-                rw_range=rw_rng,
-            ))
-            continue
-
-        # 2.5. Fallback when Start/End Frame has a typo (e.g. Review typed 23000~23049 instead of 33000~33049):
-        # match unused Review record with SAME Job ID + SAME Frames (prefer matching BBOX & closest date)
-        if wb.start_frame is not None and wb.end_frame is not None and wb.job_id:
-            same_job_cands = []
-            for c in cands:
-                if id(c) in matched_rw_ids or c.job_id != wb.job_id:
-                    continue
-                if abs(c.frames - wb.frames) > 1e-6:
-                    continue
-                d_ref = c.date_work or c.date_inspect
-                if d_ref is not None and abs((d_ref - wb.date).days) > 14:
-                    continue
-                same_job_cands.append(c)
             if same_job_cands:
-                def _score_sj(c: ReworkRecord) -> Tuple[int, int]:
-                    bb_pen = 0 if (abs(c.bbox - wb.bbox) <= 1e-6 or c.bbox == 0 or wb.bbox == 0) else 1
-                    d_ref = c.date_work or c.date_inspect
-                    dist = abs((d_ref - wb.date).days) if d_ref else 0
-                    return (bb_pen, dist)
-                sj_match = min(same_job_cands, key=_score_sj)
+                sj_match = min(
+                    same_job_cands,
+                    key=lambda c: (
+                        0 if ((c.date_inspect or c.date_work) is not None and (c.date_inspect or c.date_work) >= wb.date) else 1,
+                        c.row_num,
+                    ),
+                )
                 _consume_rw(wt_key, [sj_match])
                 rw_rng = _fmt_range(sj_match.start_frame, sj_match.end_frame)
                 job_err = _check_dist_job_ids(wb, [sj_match])
@@ -1988,13 +2065,23 @@ def _match_blocks_with_frame_ranges(
                 ))
                 continue
 
-        # 3. Fallback when WL block lacks Start/End Frame: match by Job ID + Frames/BBOX
+        # 3. Fallback when WL block lacks Start/End Frame: match unused & unreserved Review by Job ID + Frames/BBOX
         if wb.start_frame is None or wb.end_frame is None:
             job_matches = [
                 c for c in cands
-                if id(c) not in matched_rw_ids and wb.job_id and c.job_id == wb.job_id
+                if id(c) not in matched_rw_ids
+                and id(c) not in reserved_rw_ids
+                and wb.job_id and c.job_id == wb.job_id
             ]
             if job_matches:
+                # Prefer exact (frames, bbox) single match if one exists
+                exact_fb = [
+                    c for c in job_matches
+                    if abs(c.frames - wb.frames) <= 1e-6
+                    and (wb.bbox == 0 or c.bbox == 0 or abs(c.bbox - wb.bbox) <= 1e-6)
+                ]
+                if exact_fb:
+                    job_matches = [exact_fb[0]]
                 _consume_rw(wt_key, job_matches)
                 sum_fr = sum(c.frames for c in job_matches)
                 sum_bb = sum(c.bbox for c in job_matches)
@@ -2248,19 +2335,30 @@ def _build_reviewer_audit(
         first = re.sub(r"\([^)]*\)", "", first)
         return normalize_job_name(first)
 
-    def _tiered_match(wb_blk: WorklogBlockRecord, cands: list, get_tn, used_ids: Optional[set] = None, single: bool = False):
+    def _tiered_match(
+        wb_blk: WorklogBlockRecord,
+        cands: list,
+        get_tn,
+        used_ids: Optional[set] = None,
+        reserved_ids: Optional[set] = None,
+        single: bool = False,
+        max_tier: int = 5,
+    ):
         """
-        Match a Reviewer WL block against candidates (Rework rows or Annotator WL blocks), in priority order:
+        Match a Reviewer WL block against candidates (Rework rows or Annotator WL blocks) strictly by
+        Task, Job ID, Frame Start/End, Frames & BBOX from Note (never using date as a match condition):
           1. Exact Start/End + same Job ID
           2. Exact Start/End + same task name (or Job ID missing / task name unknown)
-          3. Overlapping frames + same Job ID
-          4. Same Job ID + same frame count (Start/End typo, e.g. 23000 instead of 33000)
-          5. Overlapping frames + same task name
+          3. Overlapping frames + same Job ID (unclaimed/unreserved)
+          4. Strict Start/End typo fallback: same Job ID + exact Frames + exact BBOX (>0) (unclaimed/unreserved)
+          5. Overlapping frames + same task name (unclaimed/unreserved)
         Returns (matched_list, tier).
         """
         sf, ef = wb_blk.start_frame, wb_blk.end_frame
         wid = wb_blk.job_id
         wtn = _clean_tn(wb_blk.job_name)
+        res_set = reserved_ids or set()
+        used_set = used_ids or set()
 
         def same_id(c) -> bool:
             return bool(wid and c.job_id and c.job_id == wid)
@@ -2276,36 +2374,54 @@ def _build_reviewer_audit(
         def has_rng(c) -> bool:
             return c.start_frame is not None and c.end_frame is not None
 
+        def is_free(c) -> bool:
+            return id(c) not in used_set and id(c) not in res_set
+
         def pick(lst):
             if not single or len(lst) <= 1:
                 return lst
-            return [min(lst, key=lambda c: (
-                1 if (used_ids is not None and id(c) in used_ids) else 0,
-                abs(((getattr(c, "date_inspect", None) or getattr(c, "date_work", None) or getattr(c, "date", None) or wb_blk.date) - wb_blk.date).days),
-            ))]
+            def _key(c):
+                u_pen = 2 if id(c) in used_set else (1 if id(c) in res_set else 0)
+                same_fr = abs(c.frames - wb_blk.frames) <= 1e-6
+                same_bb = (wb_blk.bbox > 0 and c.bbox > 0 and abs(c.bbox - wb_blk.bbox) <= 1e-6)
+                v_pen = 0 if (same_fr and same_bb) else (1 if same_fr else 2)
+                c_dt = getattr(c, "date_inspect", None) or getattr(c, "date_work", None) or getattr(c, "date", None)
+                ord_pen = 0 if (c_dt is not None and c_dt >= wb_blk.date) else 1
+                return (u_pen, v_pen, ord_pen, getattr(c, "row_num", 0))
+            return [min(lst, key=_key)]
 
         if sf is None or ef is None:
-            if wid:
-                return pick([c for c in cands if same_id(c) and (used_ids is None or id(c) not in used_ids)]), 4
+            if wid and max_tier >= 4:
+                free_id = [c for c in cands if same_id(c) and is_free(c)]
+                return pick(free_id), 4
             return [], 0
         exact = [c for c in cands if c.start_frame == sf and c.end_frame == ef]
         t1 = [c for c in exact if same_id(c)]
         if t1:
             return pick(t1), 1
+        if max_tier < 2:
+            return [], 0
         t2 = [c for c in exact if same_tn(c) or tn_unknown(c)]
         if t2:
             return pick(t2), 2
-        t3 = [c for c in cands if has_rng(c) and same_id(c) and max(sf, c.start_frame) <= min(ef, c.end_frame)]
+        if max_tier < 3:
+            return [], 0
+        t3 = [c for c in cands if has_rng(c) and is_free(c) and same_id(c) and max(sf, c.start_frame) <= min(ef, c.end_frame)]
         if t3:
             return t3, 3
+        if max_tier < 4:
+            return [], 0
         t4 = [
             c for c in cands
-            if same_id(c) and abs(c.frames - wb_blk.frames) <= 1e-6
-            and (used_ids is None or id(c) not in used_ids)
+            if same_id(c) and is_free(c)
+            and wb_blk.frames > 0 and abs(c.frames - wb_blk.frames) <= 1e-6
+            and wb_blk.bbox > 0 and c.bbox > 0 and abs(c.bbox - wb_blk.bbox) <= 1e-6
         ]
         if t4:
-            return [min(t4, key=lambda c: abs(((getattr(c, "date_inspect", None) or getattr(c, "date_work", None) or getattr(c, "date", None) or wb_blk.date) - wb_blk.date).days))], 4
-        t5 = [c for c in cands if has_rng(c) and same_tn(c) and max(sf, c.start_frame) <= min(ef, c.end_frame)]
+            return pick(t4), 4
+        if max_tier < 5:
+            return [], 0
+        t5 = [c for c in cands if has_rng(c) and is_free(c) and same_tn(c) and max(sf, c.start_frame) <= min(ef, c.end_frame)]
         if t5:
             return t5, 5
         return [], 0
@@ -2325,27 +2441,65 @@ def _build_reviewer_audit(
     diffs_by_it = defaultdict(list)
     matched_rw_ids = set()
 
+    # Pre-reserve Rework rows that already exactly match outside-period Reviewer Work Log blocks
+    reserved_rev_rw_ids: set = set()
+    rev_in_range: List[WorklogBlockRecord] = []
     for wb in ds.reviewer_worklog_blocks:
-        if not (start_date <= wb.date <= end_date):
-            continue
         base_task = strip_rew_suffix(wb.task)
-        if selected_tasks is not None and base_task not in selected_tasks and wb.task not in selected_tasks:
+        if start_date <= wb.date <= end_date:
+            if selected_tasks is not None and base_task not in selected_tasks and wb.task not in selected_tasks:
+                continue
+            rev_in_range.append(wb)
+        elif wb.start_frame is not None and wb.end_frame is not None:
+            it_key = (wb.annotator_key, base_task)
+            m_out, _ = _tiered_match(
+                wb, rw_all_by_it.get(it_key, []), lambda c: "",
+                used_ids=reserved_rev_rw_ids, single=True, max_tier=2,
+            )
+            for m in m_out:
+                reserved_rev_rw_ids.add(id(m))
+
+    # Multi-pass matching for in-range Reviewer WL blocks (Exact first -> Overlaps & Strict Typo fallback)
+    rev_rw_matches: Dict[int, Tuple[List[ReworkRecord], int]] = {}
+    for idx_wb, wb in enumerate(rev_in_range):
+        it_key = (wb.annotator_key, strip_rew_suffix(wb.task))
+        m_rws, m_tier = _tiered_match(
+            wb, rw_all_by_it.get(it_key, []), lambda c: "",
+            used_ids=matched_rw_ids, reserved_ids=reserved_rev_rw_ids, single=True, max_tier=2,
+        )
+        if m_rws:
+            rev_rw_matches[idx_wb] = (m_rws, m_tier)
+            for m in m_rws:
+                if id(m) not in matched_rw_ids:
+                    matched_rw_ids.add(id(m))
+                    rw_agg[it_key][0] += m.frames
+                    rw_agg[it_key][1] += m.bbox
+                    rw_agg[it_key][2] += m.work_time
+
+    for idx_wb, wb in enumerate(rev_in_range):
+        if idx_wb in rev_rw_matches:
             continue
-        it_key = (wb.annotator_key, base_task)
-        insp_disp = wb.annotator_display
-        wl_rng = _fmt_range(wb.start_frame, wb.end_frame)
-        wl_loc = f"{wb.sheet_name}!{wb.cell_ref}"
-
-        # Match against Inspection & Rework (same Reviewer + mode, across ALL dates)
-        rw_cands = rw_all_by_it.get(it_key, [])
-        matched_rws, rw_tier = _tiered_match(wb, rw_cands, lambda c: "", used_ids=matched_rw_ids, single=True)
-
-        for m in matched_rws:
+        it_key = (wb.annotator_key, strip_rew_suffix(wb.task))
+        m_rws, m_tier = _tiered_match(
+            wb, rw_all_by_it.get(it_key, []), lambda c: "",
+            used_ids=matched_rw_ids, reserved_ids=reserved_rev_rw_ids, single=True, max_tier=5,
+        )
+        rev_rw_matches[idx_wb] = (m_rws, m_tier)
+        for m in m_rws:
             if id(m) not in matched_rw_ids:
                 matched_rw_ids.add(id(m))
                 rw_agg[it_key][0] += m.frames
                 rw_agg[it_key][1] += m.bbox
                 rw_agg[it_key][2] += m.work_time
+
+    for idx_wb, wb in enumerate(rev_in_range):
+        base_task = strip_rew_suffix(wb.task)
+        it_key = (wb.annotator_key, base_task)
+        insp_disp = wb.annotator_display
+        wl_rng = _fmt_range(wb.start_frame, wb.end_frame)
+        wl_loc = f"{wb.sheet_name}!{wb.cell_ref}"
+
+        matched_rws, rw_tier = rev_rw_matches.get(idx_wb, ([], 0))
 
         # Match against Annotator Work Log (same mode, across ALL dates; scoped by Job ID / task name)
         ann_cands = ann_blocks_by_task.get(base_task, [])

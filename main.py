@@ -87,7 +87,7 @@ from updater import (
 
 
 APP_NAME = "Annotator & Inspector Report"
-APP_VERSION = "2.7"
+APP_VERSION = "2.8"
 
 DEFAULT_SP_WL_URL = (
     "https://hanwhaworkplace.sharepoint.com/:x:/r/sites/HVV-AILabAnnotation/"
@@ -843,25 +843,17 @@ class MainWindow(QMainWindow):
         self.tbl_rev.cellDoubleClicked.connect(lambda r, _c: self._on_rank_double_click(self.tbl_rev, r))
         self.tabs.addTab(self.tbl_rev, "Inspector")
 
-        # Tab 4: Bảng Xếp Hạng (Lowest Error Rate Ranking for Workers & 1st Inspectors)
-        tab_rank = QWidget()
-        rank_lay = QVBoxLayout(tab_rank)
+        # Tab 4: Bảng Xếp Hạng (Lowest Frame Error Rate Ranking for Workers & 1st Inspectors)
+        self.tab_rank = QWidget()
+        rank_lay = QVBoxLayout(self.tab_rank)
         rank_lay.setContentsMargins(10, 10, 10, 10)
         rank_lay.setSpacing(8)
 
         rank_top = QHBoxLayout()
-        lbl_rk_info = QLabel("🏆 Bảng xếp hạng tỉ lệ lỗi thấp nhất (Hạng 1 = Tỉ lệ lỗi thấp nhất)")
+        lbl_rk_info = QLabel("🏆 Bảng xếp hạng tỉ lệ lỗi Frame thấp nhất (Hạng 1 = Tỉ lệ lỗi Frame thấp nhất)")
         lbl_rk_info.setStyleSheet("font-weight: 700; font-size: 12.5px;")
         rank_top.addWidget(lbl_rk_info)
         rank_top.addStretch(1)
-        rank_top.addWidget(QLabel("Xếp hạng ưu tiên theo:"))
-        self.seg_rank_by = SegmentedControl([
-            ("Tỉ lệ lỗi Frame (%)", "frame"),
-            ("Tỉ lệ lỗi BBOX (%)", "bbox"),
-        ])
-        self.seg_rank_by.setFixedWidth(280)
-        self.seg_rank_by.changed.connect(lambda _v: self._render_ranking_tables(self.current_report) if self.current_report else None)
-        rank_top.addWidget(self.seg_rank_by)
         rank_lay.addLayout(rank_top)
 
         rank_split = QSplitter(Qt.Orientation.Horizontal)
@@ -894,11 +886,68 @@ class MainWindow(QMainWindow):
 
         rank_split.setSizes([600, 600])
         rank_lay.addWidget(rank_split, 1)
-        self.tabs.addTab(tab_rank, "Bảng Xếp Hạng")
+        self.tabs.addTab(self.tab_rank, "Bảng Xếp Hạng")
 
-        # Tab 4: Kiểm tra dữ liệu (2 sub-tabs: Check Annotator & Check Inspector)
-        tab_audit = QWidget()
-        audit_lay = QVBoxLayout(tab_audit)
+        # Tab 5: Hiệu suất (Tỉ lệ lỗi Frame thấp & Sản lượng nhiều)
+        self.tab_perf = QWidget()
+        perf_lay = QVBoxLayout(self.tab_perf)
+        perf_lay.setContentsMargins(10, 10, 10, 10)
+        perf_lay.setSpacing(8)
+
+        perf_top = QHBoxLayout()
+        lbl_pf_info = QLabel("⭐ Xếp hạng Hiệu suất: Tỉ lệ lỗi thấp & Sản lượng nhiều (Thang 100 điểm)")
+        lbl_pf_info.setStyleSheet("font-weight: 700; font-size: 12.5px;")
+        lbl_pf_info.setToolTip(
+            "Điểm Tổng = (Trọng số Chất lượng × Điểm lỗi Frame thấp) + (Trọng số Sản lượng × Điểm sản lượng Frame & BBOX)"
+        )
+        perf_top.addWidget(lbl_pf_info)
+        perf_top.addStretch(1)
+        perf_top.addWidget(QLabel("Trọng số:"))
+        self.seg_perf_weight = SegmentedControl([
+            ("Cân bằng 50/50", "50_50"),
+            ("Lỗi thấp 60/40", "60_40"),
+            ("Sản lượng 40/60", "40_60"),
+        ])
+        self.seg_perf_weight.setFixedWidth(360)
+        self.seg_perf_weight.changed.connect(lambda _v: self._render_performance_tables(self.current_report) if self.current_report else None)
+        perf_top.addWidget(self.seg_perf_weight)
+        perf_lay.addLayout(perf_top)
+
+        perf_split = QSplitter(Qt.Orientation.Horizontal)
+
+        w_perf_box = QWidget()
+        w_play = QVBoxLayout(w_perf_box)
+        w_play.setContentsMargins(0, 0, 4, 0)
+        w_play.setSpacing(5)
+        self.lbl_perf_worker = QLabel("⭐ Hiệu suất Annotator / Worker")
+        self.lbl_perf_worker.setStyleSheet("font-weight: 700; font-size: 12.5px; color: #2563EB;")
+        w_play.addWidget(self.lbl_perf_worker)
+        self.tbl_perf_worker = QTableWidget()
+        self._setup_table(self.tbl_perf_worker)
+        self.tbl_perf_worker.cellDoubleClicked.connect(lambda r, _c: self._on_rank_double_click(self.tbl_perf_worker, r))
+        w_play.addWidget(self.tbl_perf_worker)
+        perf_split.addWidget(w_perf_box)
+
+        rev_perf_box = QWidget()
+        rev_play = QVBoxLayout(rev_perf_box)
+        rev_play.setContentsMargins(4, 0, 0, 0)
+        rev_play.setSpacing(5)
+        self.lbl_perf_reviewer = QLabel("⭐ Hiệu suất Inspector Lần 1")
+        self.lbl_perf_reviewer.setStyleSheet("font-weight: 700; font-size: 12.5px; color: #059669;")
+        rev_play.addWidget(self.lbl_perf_reviewer)
+        self.tbl_perf_reviewer = QTableWidget()
+        self._setup_table(self.tbl_perf_reviewer)
+        self.tbl_perf_reviewer.cellDoubleClicked.connect(lambda r, _c: self._on_rank_double_click(self.tbl_perf_reviewer, r))
+        rev_play.addWidget(self.tbl_perf_reviewer)
+        perf_split.addWidget(rev_perf_box)
+
+        perf_split.setSizes([600, 600])
+        perf_lay.addWidget(perf_split, 1)
+        self.tabs.addTab(self.tab_perf, "Hiệu suất")
+
+        # Tab 6: Kiểm tra dữ liệu (2 sub-tabs: Check Annotator & Check Inspector)
+        self.tab_audit = QWidget()
+        audit_lay = QVBoxLayout(self.tab_audit)
         audit_lay.setContentsMargins(10, 10, 10, 10)
         audit_lay.setSpacing(8)
 
@@ -917,7 +966,7 @@ class MainWindow(QMainWindow):
         self.audit_mode_tabs.addTab(page_rev, "Inspector")
 
         audit_lay.addWidget(self.audit_mode_tabs)
-        self.tabs.addTab(tab_audit, "Kiểm tra dữ liệu")
+        self.tabs.addTab(self.tab_audit, "Kiểm tra dữ liệu")
         self.tabs.currentChanged.connect(self._sync_people_filter_panel)
 
         main_lay.addWidget(self.tabs, 1)
@@ -1384,6 +1433,7 @@ class MainWindow(QMainWindow):
             self._render_template2(self.current_report)
             self._render_inspector_tab()
             self._render_ranking_tables(self.current_report)
+            self._render_performance_tables(self.current_report)
             self._render_audit_table(self.current_report)
             self._render_reviewer_audit_table(self.current_report)
 
@@ -2034,6 +2084,7 @@ class MainWindow(QMainWindow):
         self._render_template2(self.current_report)
         self._render_inspector_tab()
         self._render_ranking_tables(self.current_report)
+        self._render_performance_tables(self.current_report)
         self._linked_audit_key = None
         self._render_audit_table(self.current_report)
         self._render_reviewer_audit_table(self.current_report)
@@ -2444,34 +2495,23 @@ class MainWindow(QMainWindow):
 
     def _render_ranking_tables(self, rep: ReportResult):
         t = self.theme
-        by_bbox = (self.seg_rank_by.current_value() == "bbox")
-
-        def worker_sort_key(r):
-            primary = r.total_err_bbox_rate if by_bbox else r.total_err_rate
-            secondary = r.total_err_rate if by_bbox else r.total_err_bbox_rate
-            return (primary, secondary, -r.work_load, r.annotator.upper())
-
-        def rev_sort_key(g):
-            primary = g.err_rate_bbox if by_bbox else g.err_rate_frame
-            secondary = g.err_rate_frame if by_bbox else g.err_rate_bbox
-            return (primary, secondary, -g.total_work_load, g.inspector.upper())
 
         workers = sorted(
-            [r for r in rep.annotator_rows if not r.is_reviewer and (r.work_load > 0 or r.work_bbox > 0)],
-            key=worker_sort_key,
+            [r for r in rep.annotator_rows if not r.is_reviewer and r.work_load > 0],
+            key=lambda r: (r.total_err_rate, -r.work_load, r.annotator.upper()),
         )
         reviewers = sorted(
-            [g for g in rep.inspector_groups if g.total_work_load > 0 or g.total_work_bbox > 0],
-            key=rev_sort_key,
+            [g for g in rep.inspector_groups if g.total_work_load > 0],
+            key=lambda g: (g.err_rate_frame, -g.total_work_load, g.inspector.upper()),
         )
 
-        self.lbl_rank_worker.setText(f"🥇 Xếp hạng Annotator / Worker ({len(workers)} người — Tỉ lệ lỗi thấp nhất)")
+        self.lbl_rank_worker.setText(f"🥇 Xếp hạng Annotator / Worker ({len(workers)} người — Tỉ lệ lỗi Frame thấp nhất)")
         self.lbl_rank_reviewer.setText(f"🥇 Inspector Lần 1 ({len(reviewers)} người) · Theo Annotator đang chọn")
 
-        # Populate Worker Ranking
+        # Populate Worker Ranking (Frame Error Rate only)
         w_tbl = self.tbl_rank_worker
         w_headers = [
-            "Hạng", "Annotator", "Err Rate\nBBOX (%)", "Err Rate\nFrame (%)",
+            "Hạng", "Annotator", "Err Rate\nFrame (%)",
         ]
         w_tbl.setColumnCount(len(w_headers))
         w_tbl.setHorizontalHeaderLabels(w_headers)
@@ -2486,23 +2526,21 @@ class MainWindow(QMainWindow):
             tip = (
                 f"Hạng #{rank_num} — {r.annotator} ({r.task}):\n"
                 f"  • Sản lượng: {_fmt_int(r.work_load)} Frame | {_fmt_int(r.work_bbox)} BBOX | {_fmt_time(r.work_time)}h\n"
-                f"  • Số lỗi: {_fmt_int(r.total_err_frame)} Frame ({_fmt_f2(r.total_err_rate)}%) | "
-                f"{_fmt_int(r.total_err_bbox)} BBOX ({_fmt_f2(r.total_err_bbox_rate)}%)"
+                f"  • Lỗi Frame: {_fmt_int(r.total_err_frame)} ({_fmt_f2(r.total_err_rate)}%)"
             )
             w_tbl.setItem(idx, 0, self._make_item(rank_lbl, Qt.AlignmentFlag.AlignCenter, True, rate_fg if is_top3 else None, bg, tip))
             w_tbl.setItem(idx, 1, self._make_item(r.annotator, Qt.AlignmentFlag.AlignCenter, True, None, bg, tip, user_data=(r.annotator_key, None)))
-            w_tbl.setItem(idx, 2, self._make_item(_fmt_f2(r.total_err_bbox_rate), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
-            w_tbl.setItem(idx, 3, self._make_item(_fmt_f2(r.total_err_rate), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
+            w_tbl.setItem(idx, 2, self._make_item(_fmt_f2(r.total_err_rate), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
         wh = w_tbl.horizontalHeader()
         wh.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         wh.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         w_tbl.setColumnWidth(0, 64)
         wh.setFixedHeight(42)
 
-        # Populate Inspector Lần 1 Ranking
+        # Populate Inspector Lần 1 Ranking (Frame Error Rate only)
         r_tbl = self.tbl_rank_reviewer
         r_headers = [
-            "Hạng", "Inspector", "Err Rate\nBBOX (%)", "Err Rate\nFrame (%)",
+            "Hạng", "Inspector", "Err Rate\nFrame (%)",
         ]
         r_tbl.setColumnCount(len(r_headers))
         r_tbl.setHorizontalHeaderLabels(r_headers)
@@ -2516,17 +2554,120 @@ class MainWindow(QMainWindow):
             tip = (
                 f"Hạng #{rank_num} — Inspector {g.inspector}:\n"
                 f"  • Sản lượng: {_fmt_int(g.total_work_load)} Frame | {_fmt_int(g.total_work_bbox)} BBOX | {_fmt_time(g.total_work_time)}h\n"
-                f"  • Lỗi: {_fmt_int(g.total_err_second)} Frame ({_fmt_f2(g.err_rate_frame)}%) | {_fmt_int(g.total_err_second_bbox)} BBOX ({_fmt_f2(g.err_rate_bbox)}%)\n"
+                f"  • Lỗi Frame: {_fmt_int(g.total_err_second)} ({_fmt_f2(g.err_rate_frame)}%)\n"
                 f"  • Recall Lần 1: {g.first_inspector_recall:.0f}%"
             )
             r_tbl.setItem(idx, 0, self._make_item(rank_lbl, Qt.AlignmentFlag.AlignCenter, True, rate_fg if is_top3 else None, bg, tip))
             r_tbl.setItem(idx, 1, self._make_item(g.inspector, Qt.AlignmentFlag.AlignCenter, True, None, bg, tip))
-            r_tbl.setItem(idx, 2, self._make_item(_fmt_f2(g.err_rate_bbox), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
-            r_tbl.setItem(idx, 3, self._make_item(_fmt_f2(g.err_rate_frame), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
+            r_tbl.setItem(idx, 2, self._make_item(_fmt_f2(g.err_rate_frame), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
         rh = r_tbl.horizontalHeader()
         rh.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         rh.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         r_tbl.setColumnWidth(0, 64)
+        rh.setFixedHeight(42)
+
+    @staticmethod
+    def _score_performance(items, get_load, get_bbox, get_err, w_err: float, w_vol: float):
+        """Return list of (item, total_score, quality_score, volume_score) sorted by highest score."""
+        if not items:
+            return []
+        errs = [get_err(x) for x in items]
+        min_e, max_e = min(errs), max(errs)
+        max_load = max((get_load(x) for x in items), default=0.0)
+        max_bbox = max((get_bbox(x) for x in items), default=0.0)
+        scored = []
+        for x in items:
+            err = get_err(x)
+            q_score = ((max_e - err) / (max_e - min_e) * 100.0) if max_e > min_e else 100.0
+            vf = (get_load(x) / max_load * 100.0) if max_load > 0 else 0.0
+            vb = (get_bbox(x) / max_bbox * 100.0) if max_bbox > 0 else vf
+            v_score = 0.5 * vf + 0.5 * vb
+            total = w_err * q_score + w_vol * v_score
+            scored.append((x, total, q_score, v_score))
+        scored.sort(key=lambda tup: (-tup[1], get_err(tup[0]), -get_load(tup[0])))
+        return scored
+
+    def _render_performance_tables(self, rep: ReportResult):
+        t = self.theme
+        mode = self.seg_perf_weight.current_value()
+        w_err, w_vol = {"50_50": (0.5, 0.5), "60_40": (0.6, 0.4), "40_60": (0.4, 0.6)}.get(mode, (0.5, 0.5))
+
+        workers_raw = [r for r in rep.annotator_rows if not r.is_reviewer and r.work_load > 0]
+        reviewers_raw = [g for g in rep.inspector_groups if g.total_work_load > 0]
+
+        w_scored = self._score_performance(
+            workers_raw, lambda r: r.work_load, lambda r: r.work_bbox, lambda r: r.total_err_rate, w_err, w_vol
+        )
+        r_scored = self._score_performance(
+            reviewers_raw, lambda g: g.total_work_load, lambda g: g.total_work_bbox, lambda g: g.err_rate_frame, w_err, w_vol
+        )
+
+        self.lbl_perf_worker.setText(f"⭐ Hiệu suất Annotator / Worker ({len(w_scored)} người — Lỗi thấp & Sản lượng nhiều)")
+        self.lbl_perf_reviewer.setText(f"⭐ Hiệu suất Inspector Lần 1 ({len(r_scored)} người — Lỗi thấp & Sản lượng nhiều)")
+
+        medals = {1: "🥇 1", 2: "🥈 2", 3: "🥉 3"}
+
+        # Populate Worker Performance Table
+        w_tbl = self.tbl_perf_worker
+        w_headers = ["Hạng", "Annotator", "Work Load\n(Frame)", "Work\nBBOX", "Err Rate\nFrame (%)", "Điểm\nTổng"]
+        w_tbl.setColumnCount(len(w_headers))
+        w_tbl.setHorizontalHeaderLabels(w_headers)
+        w_tbl.setRowCount(len(w_scored))
+        for idx, (r, tot, q_sc, v_sc) in enumerate(w_scored):
+            rank_num = idx + 1
+            rank_lbl = medals.get(rank_num, str(rank_num))
+            is_top3 = (rank_num <= 3)
+            bg = t["success_soft"] if is_top3 else None
+            score_fg = t["success"] if is_top3 else t["accent_text"]
+            rate_fg = t["success"] if r.total_err_rate <= 1.0 else t["danger"]
+            tip = (
+                f"Hạng #{rank_num} — {r.annotator} ({r.task}):\n"
+                f"  • Điểm Tổng: {tot:.1f} / 100 (Lỗi thấp: {q_sc:.1f} × {int(w_err*100)}% + Sản lượng: {v_sc:.1f} × {int(w_vol*100)}%)\n"
+                f"  • Sản lượng: {_fmt_int(r.work_load)} Frame | {_fmt_int(r.work_bbox)} BBOX | {_fmt_time(r.work_time)}h\n"
+                f"  • Tốc độ: {_fmt_f2(r.frame_per_hour)} fr/h | {_fmt_f2(r.bbox_per_hour)} bbox/h\n"
+                f"  • Lỗi Frame: {_fmt_int(r.total_err_frame)} ({_fmt_f2(r.total_err_rate)}%)"
+            )
+            w_tbl.setItem(idx, 0, self._make_item(rank_lbl, Qt.AlignmentFlag.AlignCenter, True, score_fg if is_top3 else None, bg, tip))
+            w_tbl.setItem(idx, 1, self._make_item(r.annotator, Qt.AlignmentFlag.AlignCenter, True, None, bg, tip, user_data=(r.annotator_key, None)))
+            w_tbl.setItem(idx, 2, self._make_item(_fmt_int(r.work_load), bold=is_top3, bg=bg, tooltip=tip))
+            w_tbl.setItem(idx, 3, self._make_item(_fmt_int(r.work_bbox), bg=bg, tooltip=tip))
+            w_tbl.setItem(idx, 4, self._make_item(_fmt_f2(r.total_err_rate), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
+            w_tbl.setItem(idx, 5, self._make_item(f"{tot:.1f}", Qt.AlignmentFlag.AlignCenter, True, fg=score_fg, bg=bg, tooltip=tip))
+        wh = w_tbl.horizontalHeader()
+        wh.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        wh.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        w_tbl.setColumnWidth(0, 62)
+        wh.setFixedHeight(42)
+
+        # Populate Inspector Performance Table
+        r_tbl = self.tbl_perf_reviewer
+        r_headers = ["Hạng", "Inspector", "Work Load\n(Frame)", "Work\nBBOX", "Err Rate\nFrame (%)", "Điểm\nTổng"]
+        r_tbl.setColumnCount(len(r_headers))
+        r_tbl.setHorizontalHeaderLabels(r_headers)
+        r_tbl.setRowCount(len(r_scored))
+        for idx, (g, tot, q_sc, v_sc) in enumerate(r_scored):
+            rank_num = idx + 1
+            rank_lbl = medals.get(rank_num, str(rank_num))
+            is_top3 = (rank_num <= 3)
+            bg = t["success_soft"] if is_top3 else None
+            score_fg = t["success"] if is_top3 else t["accent_text"]
+            rate_fg = t["success"] if g.err_rate_frame <= 0.5 else t["danger"]
+            tip = (
+                f"Hạng #{rank_num} — Inspector {g.inspector}:\n"
+                f"  • Điểm Tổng: {tot:.1f} / 100 (Lỗi thấp: {q_sc:.1f} × {int(w_err*100)}% + Sản lượng: {v_sc:.1f} × {int(w_vol*100)}%)\n"
+                f"  • Sản lượng: {_fmt_int(g.total_work_load)} Frame | {_fmt_int(g.total_work_bbox)} BBOX | {_fmt_time(g.total_work_time)}h\n"
+                f"  • Lỗi Frame: {_fmt_int(g.total_err_second)} ({_fmt_f2(g.err_rate_frame)}%) | Recall: {g.first_inspector_recall:.0f}%"
+            )
+            r_tbl.setItem(idx, 0, self._make_item(rank_lbl, Qt.AlignmentFlag.AlignCenter, True, score_fg if is_top3 else None, bg, tip))
+            r_tbl.setItem(idx, 1, self._make_item(g.inspector, Qt.AlignmentFlag.AlignCenter, True, None, bg, tip))
+            r_tbl.setItem(idx, 2, self._make_item(_fmt_int(g.total_work_load), bold=is_top3, bg=bg, tooltip=tip))
+            r_tbl.setItem(idx, 3, self._make_item(_fmt_int(g.total_work_bbox), bg=bg, tooltip=tip))
+            r_tbl.setItem(idx, 4, self._make_item(_fmt_f2(g.err_rate_frame), bold=True, fg=rate_fg, bg=bg, tooltip=tip))
+            r_tbl.setItem(idx, 5, self._make_item(f"{tot:.1f}", Qt.AlignmentFlag.AlignCenter, True, fg=score_fg, bg=bg, tooltip=tip))
+        rh = r_tbl.horizontalHeader()
+        rh.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        rh.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        r_tbl.setColumnWidth(0, 62)
         rh.setFixedHeight(42)
 
     def _selected_audit_summary(self, table: QTableWidget):
@@ -2609,6 +2750,8 @@ class MainWindow(QMainWindow):
         tbl.setColumnCount(len(headers))
         tbl.setHorizontalHeaderLabels(headers)
         tbl.horizontalHeaderItem(2).setToolTip("Tên Inspector trên các dòng Review được đối chiếu.")
+        tbl.horizontalHeaderItem(3).setToolTip("Ngày ghi bên Work Log (chỉ để tham khảo vị trí, không dùng so sánh lệch).")
+        tbl.horizontalHeaderItem(4).setToolTip("Ngày ghi bên Review (thường sau Work Log 1 hoặc vài ngày — không tính là lệch).")
         tbl.setRowCount(len(diffs))
         tbl.setWordWrap(True)
 
@@ -2616,7 +2759,7 @@ class MainWindow(QMainWindow):
             is_pend = d.is_pending
             bg = t["accent_soft"] if is_pend else t["warn_soft"]
             accent_fg = t["accent_text"] if is_pend else t["warn"]
-            date_fg = t["accent_text"] if is_pend else t["danger"]
+            rng_err_fg = t["accent_text"] if is_pend else t["danger"]
             if d.is_missing_bbox:
                 kind_lbl = "⏳ Chưa nhập BBOX"
             elif is_pend:
@@ -2631,7 +2774,7 @@ class MainWindow(QMainWindow):
 
             if d.wl_range and d.rw_range and d.wl_range != d.rw_range:
                 rng_txt = f"WL: {d.wl_range}\nRW: {d.rw_range}"
-                rng_fg = date_fg
+                rng_fg = rng_err_fg
             else:
                 rng_txt = d.wl_range or d.rw_range or "—"
                 rng_fg = None
@@ -2645,7 +2788,7 @@ class MainWindow(QMainWindow):
             tbl.setItem(row_i, 0, self._make_item(kind_lbl, bold=True, fg=accent_fg, bg=bg))
             tbl.setItem(row_i, 1, self._make_item(d.annotator, bold=True, bg=bg))
             tbl.setItem(row_i, 2, self._make_item(", ".join(d.inspectors) or "—", bold=True, bg=bg))
-            tbl.setItem(row_i, 3, self._make_item(d.date.strftime("%Y-%m-%d"), bold=True, fg=date_fg, bg=bg))
+            tbl.setItem(row_i, 3, self._make_item(d.date.strftime("%Y-%m-%d"), bg=bg))
             tbl.setItem(row_i, 4, self._make_item(rw_dt_str, bg=bg))
             tbl.setItem(row_i, 5, self._make_item(d.task, bold=True, bg=bg))
             tbl.setItem(row_i, 6, self._make_item(d.job_id or "—", bold=True, bg=bg))
@@ -2674,6 +2817,8 @@ class MainWindow(QMainWindow):
         ]
         tbl.setColumnCount(len(headers))
         tbl.setHorizontalHeaderLabels(headers)
+        tbl.horizontalHeaderItem(3).setToolTip("Ngày ghi bên Work Log Inspector (chỉ để tham khảo, không dùng so sánh lệch).")
+        tbl.horizontalHeaderItem(4).setToolTip("Ngày ghi bên Review (có thể lệch ngày so với Work Log — không tính là lệch).")
         tbl.setRowCount(len(diffs))
         tbl.setWordWrap(True)
 
@@ -2690,7 +2835,7 @@ class MainWindow(QMainWindow):
             tbl.setItem(row_i, 0, self._make_item(kind_lbl, Qt.AlignmentFlag.AlignCenter, True, fg=accent_fg, bg=bg))
             tbl.setItem(row_i, 1, self._make_item(d.inspector, Qt.AlignmentFlag.AlignCenter, True, bg=bg))
             tbl.setItem(row_i, 2, self._make_item(d.annotator, Qt.AlignmentFlag.AlignCenter, True, bg=bg))
-            tbl.setItem(row_i, 3, self._make_item(d.date.strftime("%Y-%m-%d"), Qt.AlignmentFlag.AlignCenter, True, fg=accent_fg, bg=bg))
+            tbl.setItem(row_i, 3, self._make_item(d.date.strftime("%Y-%m-%d"), Qt.AlignmentFlag.AlignCenter, bg=bg))
             tbl.setItem(row_i, 4, self._make_item(rw_dt_str, Qt.AlignmentFlag.AlignCenter, bg=bg))
             tbl.setItem(row_i, 5, self._make_item(d.task, bold=True, bg=bg))
             tbl.setItem(row_i, 6, self._make_item(d.job_id or "—", bold=True, bg=bg))
@@ -2730,7 +2875,7 @@ class MainWindow(QMainWindow):
         if status and status != target.status_kind:
             with QSignalBlocker(self.cb_audit_status):
                 self.cb_audit_status.setCurrentIndex(0)
-        self.tabs.setCurrentIndex(4)
+        self.tabs.setCurrentWidget(self.tab_audit)
         self.audit_mode_tabs.setCurrentIndex(0)
         self._render_audit_table(self.current_report, select_key=key)
         self.tbl_audit.setFocus()
@@ -2755,15 +2900,17 @@ class MainWindow(QMainWindow):
     # COPY & EXPORT
     # ------------------------------------------------------------------
     def copy_current_table(self):
-        idx = self.tabs.currentIndex()
-        if idx == 0:
+        cur_w = self.tabs.currentWidget()
+        if self.tabs.currentIndex() == 0:
             tbl = self.tbl_t1_summary if self.tbl_t1_summary.hasFocus() else self.tbl_t1
-        elif idx == 1:
+        elif cur_w is self.tbl_t2:
             tbl = self.tbl_t2
-        elif idx == 2:
+        elif cur_w is self.tbl_rev:
             tbl = self.tbl_rev
-        elif idx == 3:
+        elif cur_w is self.tab_rank:
             tbl = self.tbl_rank_reviewer if self.tbl_rank_reviewer.hasFocus() else self.tbl_rank_worker
+        elif cur_w is self.tab_perf:
+            tbl = self.tbl_perf_reviewer if self.tbl_perf_reviewer.hasFocus() else self.tbl_perf_worker
         else:
             if self.audit_mode_tabs.currentIndex() == 1:
                 summary, details = self.tbl_rev_audit, self.tbl_rev_diffs

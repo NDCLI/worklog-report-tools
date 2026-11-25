@@ -440,22 +440,22 @@ def _write_ranking_sheet(wb: openpyxl.Workbook, report: ReportResult):
     ws.views.sheetView[0].showGridLines = True
 
     workers = sorted(
-        [r for r in report.annotator_rows if not r.is_reviewer and (r.work_load > 0 or r.work_bbox > 0)],
-        key=lambda r: (r.total_err_rate, r.total_err_bbox_rate, -r.work_load, r.annotator.upper()),
+        [r for r in report.annotator_rows if not r.is_reviewer and r.work_load > 0],
+        key=lambda r: (r.total_err_rate, -r.work_load, r.annotator.upper()),
     )
     reviewers = sorted(
-        [g for g in report.inspector_groups if g.total_work_load > 0 or g.total_work_bbox > 0],
-        key=lambda g: (g.err_rate_frame, g.err_rate_bbox, -g.total_work_load, g.inspector.upper()),
+        [g for g in report.inspector_groups if g.total_work_load > 0],
+        key=lambda g: (g.err_rate_frame, -g.total_work_load, g.inspector.upper()),
     )
 
     def write_rank_block(start_row: int, title: str, name_hdr: str, rows_list, is_rev: bool = False) -> int:
-        ws.merge_cells(start_row=start_row, start_column=1, end_row=start_row, end_column=4)
+        ws.merge_cells(start_row=start_row, start_column=1, end_row=start_row, end_column=3)
         title_cell = ws.cell(start_row, 1, title)
         title_cell.font = FONT_AUDIT_HDR
         if is_rev:
             title_cell.alignment = ALIGN_LEFT
         ws.row_dimensions[start_row].height = 36 if is_rev else 24
-        for c in range(1, 5):
+        for c in range(1, 4):
             ws.cell(start_row, c).fill = DARK_HEADER_FILL
 
         hdr_row = start_row + 1
@@ -463,7 +463,6 @@ def _write_ranking_sheet(wb: openpyxl.Workbook, report: ReportResult):
             "Hạng",
             name_hdr,
             "Err Rate Frame (%)",
-            "Err Rate BBOX (%)",
         ]
         ws.row_dimensions[hdr_row].height = 28
         for c, h in enumerate(hdrs, start=1):
@@ -480,13 +479,11 @@ def _write_ranking_sheet(wb: openpyxl.Workbook, report: ReportResult):
             if is_rev:
                 ws.cell(cur, 2, rdata.inspector)
                 ws.cell(cur, 3, round(rdata.err_rate_frame, 2))
-                ws.cell(cur, 4, round(rdata.err_rate_bbox, 2))
             else:
                 ws.cell(cur, 2, rdata.annotator)
                 ws.cell(cur, 3, round(rdata.total_err_rate, 2))
-                ws.cell(cur, 4, round(rdata.total_err_bbox_rate, 2))
 
-            for c in range(1, 5):
+            for c in range(1, 4):
                 cell = ws.cell(cur, c)
                 cell.border = _make_border(THIN_GRAY, THIN_GRAY, THIN_GRAY, THIN_GRAY)
                 if rank_idx <= 3:
@@ -503,21 +500,110 @@ def _write_ranking_sheet(wb: openpyxl.Workbook, report: ReportResult):
 
     next_r = write_rank_block(
         1,
-        f"BẢNG XẾP HẠNG ANNOTATOR (WORKER) — TỈ LỆ LỖI THẤP NHẤT ({report.start_date.strftime('%Y.%m.%d')} ~ {report.end_date.strftime('%Y.%m.%d')})",
+        f"BẢNG XẾP HẠNG ANNOTATOR (WORKER) — TỈ LỆ LỖI FRAME THẤP NHẤT ({report.start_date.strftime('%Y.%m.%d')} ~ {report.end_date.strftime('%Y.%m.%d')})",
         "Annotator (Worker)",
         workers,
         is_rev=False,
     )
-    write_rank_block(
+    next_r = write_rank_block(
         next_r,
         f"BẢNG XẾP HẠNG INSPECTOR (LẦN 1) — {report.start_date:%Y.%m.%d} ~ {report.end_date:%Y.%m.%d}\n"
-        "Tỉ lệ lỗi thấp nhất theo Annotator đang chọn",
+        "Tỉ lệ lỗi Frame thấp nhất theo Annotator đang chọn",
         "Inspector (Lần 1)",
         reviewers,
         is_rev=True,
     )
 
-    widths = [10, 22, 20, 20]
+    # Also write Performance Ranking (Low Frame Error Rate + High Volume, 50/50)
+    def _score_perf(items, get_load, get_bbox, get_err):
+        if not items:
+            return []
+        errs = [get_err(x) for x in items]
+        min_e, max_e = min(errs), max(errs)
+        max_l = max((get_load(x) for x in items), default=0.0)
+        max_b = max((get_bbox(x) for x in items), default=0.0)
+        out = []
+        for x in items:
+            q = ((max_e - get_err(x)) / (max_e - min_e) * 100.0) if max_e > min_e else 100.0
+            vf = (get_load(x) / max_l * 100.0) if max_l > 0 else 0.0
+            vb = (get_bbox(x) / max_b * 100.0) if max_b > 0 else vf
+            tot = 0.5 * q + 0.5 * (0.5 * vf + 0.5 * vb)
+            out.append((x, tot))
+        out.sort(key=lambda t: (-t[1], get_err(t[0]), -get_load(t[0])))
+        return out
+
+    def write_perf_block(start_row: int, title: str, name_hdr: str, scored_list, is_rev: bool = False) -> int:
+        ws.merge_cells(start_row=start_row, start_column=1, end_row=start_row, end_column=6)
+        tcell = ws.cell(start_row, 1, title)
+        tcell.font = FONT_AUDIT_HDR
+        ws.row_dimensions[start_row].height = 24
+        for c in range(1, 7):
+            ws.cell(start_row, c).fill = DARK_HEADER_FILL
+        hdr_row = start_row + 1
+        hdrs = ["Hạng", name_hdr, "Work Load (Frame)", "Work BBOX", "Err Rate Frame (%)", "Điểm Tổng"]
+        ws.row_dimensions[hdr_row].height = 28
+        for c, h in enumerate(hdrs, start=1):
+            cell = ws.cell(hdr_row, c, h)
+            cell.font = FONT_HEADER
+            cell.fill = SUB_HEADER_FILL
+            cell.alignment = ALIGN_CENTER
+            cell.border = _make_border(THIN_BLACK, THIN_BLACK, THIN_BLACK, MEDIUM_BLACK)
+        cur = hdr_row + 1
+        for rank_idx, (rdata, score) in enumerate(scored_list, start=1):
+            ws.row_dimensions[cur].height = 20
+            ws.cell(cur, 1, rank_idx)
+            if is_rev:
+                ws.cell(cur, 2, rdata.inspector)
+                ws.cell(cur, 3, _clean_num(rdata.total_work_load))
+                ws.cell(cur, 4, _clean_num(rdata.total_work_bbox))
+                ws.cell(cur, 5, round(rdata.err_rate_frame, 2))
+            else:
+                ws.cell(cur, 2, rdata.annotator)
+                ws.cell(cur, 3, _clean_num(rdata.work_load))
+                ws.cell(cur, 4, _clean_num(rdata.work_bbox))
+                ws.cell(cur, 5, round(rdata.total_err_rate, 2))
+            ws.cell(cur, 6, round(score, 1))
+            for c in range(1, 7):
+                cell = ws.cell(cur, c)
+                cell.border = _make_border(THIN_GRAY, THIN_GRAY, THIN_GRAY, THIN_GRAY)
+                if rank_idx <= 3:
+                    cell.fill = OK_FILL
+                if c in (1, 2):
+                    cell.font = FONT_BOLD
+                    cell.alignment = ALIGN_CENTER
+                elif c in (3, 4):
+                    cell.font = FONT_REGULAR
+                    cell.alignment = ALIGN_RIGHT
+                    cell.number_format = "#,##0"
+                elif c == 5:
+                    cell.font = FONT_RED_BOLD if rank_idx > 3 else FONT_GREEN_BOLD
+                    cell.alignment = ALIGN_RIGHT
+                    cell.number_format = "0.00"
+                else:
+                    cell.font = FONT_GREEN_BOLD if rank_idx <= 3 else FONT_BOLD
+                    cell.alignment = ALIGN_CENTER
+                    cell.number_format = "0.0"
+            cur += 1
+        return cur + 2
+
+    w_perf = _score_perf(workers, lambda r: r.work_load, lambda r: r.work_bbox, lambda r: r.total_err_rate)
+    r_perf = _score_perf(reviewers, lambda g: g.total_work_load, lambda g: g.total_work_bbox, lambda g: g.err_rate_frame)
+    next_r = write_perf_block(
+        next_r,
+        f"HIỆU SUẤT ANNOTATOR — LỖI THẤP & SẢN LƯỢNG NHIỀU ({report.start_date.strftime('%Y.%m.%d')} ~ {report.end_date.strftime('%Y.%m.%d')})",
+        "Annotator (Worker)",
+        w_perf,
+        is_rev=False,
+    )
+    write_perf_block(
+        next_r,
+        f"HIỆU SUẤT INSPECTOR — LỖI THẤP & SẢN LƯỢNG NHIỀU ({report.start_date.strftime('%Y.%m.%d')} ~ {report.end_date.strftime('%Y.%m.%d')})",
+        "Inspector (Lần 1)",
+        r_perf,
+        is_rev=True,
+    )
+
+    widths = [10, 22, 18, 16, 18, 14]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
