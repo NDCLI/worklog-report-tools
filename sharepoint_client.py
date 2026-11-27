@@ -1,5 +1,6 @@
 import json
 import os
+import time
 import urllib.parse
 from typing import Callable, Dict, Optional
 
@@ -200,74 +201,102 @@ def download_sp_file_with_cookies(
     }
 
     last_err = ""
+    sp_timeout = (20, 120)
+    max_retries = 3
+    retryable_statuses = {429, 500, 502, 503, 504}
+
     for url in candidates:
-        try:
-            resp = requests.get(
-                url,
-                cookies=cookies,
-                headers=headers,
-                stream=True,
-                timeout=45,
-                allow_redirects=False,
-            )
-        except Exception as exc:
-            last_err = str(exc)
-            continue
+        for attempt in range(max_retries):
+            if attempt > 0:
+                time.sleep(1.5 * attempt)
+            resp = None
+            tmp_path = dest_path + ".tmp"
+            try:
+                resp = requests.get(
+                    url,
+                    cookies=cookies,
+                    headers=headers,
+                    stream=True,
+                    timeout=sp_timeout,
+                    allow_redirects=False,
+                )
 
-        # Redirect to login or 401/403 -> session expired
-        loc = (resp.headers.get("Location") or "").lower()
-        if resp.status_code in (401, 403) or (
-            resp.status_code in (301, 302, 303, 307, 308)
-            and ("login.microsoftonline.com" in loc or "authenticate.aspx" in loc or "login.live.com" in loc)
-        ):
-            resp.close()
-            raise SessionExpiredError("Phiên đăng nhập SharePoint đã hết hạn, cần đăng nhập lại.")
+                # Redirect to login or 401/403 -> session expired
+                loc = (resp.headers.get("Location") or "").lower()
+                if resp.status_code in (401, 403) or (
+                    resp.status_code in (301, 302, 303, 307, 308)
+                    and ("login.microsoftonline.com" in loc or "authenticate.aspx" in loc or "login.live.com" in loc)
+                ):
+                    resp.close()
+                    raise SessionExpiredError("Phiên đăng nhập SharePoint đã hết hạn, cần đăng nhập lại.")
 
-        # Follow non-login redirect once if needed
-        if resp.status_code in (301, 302, 303, 307, 308) and loc:
-            resp.close()
-            resp = requests.get(
-                urllib.parse.urljoin(url, resp.headers["Location"]),
-                cookies=cookies,
-                headers=headers,
-                stream=True,
-                timeout=45,
-                allow_redirects=True,
-            )
+                # Follow non-login redirect once if needed
+                if resp.status_code in (301, 302, 303, 307, 308) and loc:
+                    redir_url = urllib.parse.urljoin(url, resp.headers["Location"])
+                    resp.close()
+                    resp = requests.get(
+                        redir_url,
+                        cookies=cookies,
+                        headers=headers,
+                        stream=True,
+                        timeout=sp_timeout,
+                        allow_redirects=True,
+                    )
 
-        if resp.status_code != 200:
-            last_err = f"HTTP {resp.status_code}"
-            resp.close()
-            continue
-
-        tmp_path = dest_path + ".tmp"
-        total = int(resp.headers.get("Content-Length") or 0)
-        written = 0
-        first_chunk = b""
-        with open(tmp_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=65536):
-                if not chunk:
+                if resp.status_code in retryable_statuses:
+                    last_err = f"HTTP {resp.status_code}"
+                    resp.close()
                     continue
-                if not first_chunk:
-                    first_chunk = chunk[:4]
-                f.write(chunk)
-                written += len(chunk)
-                if progress_cb and total > 0:
-                    progress_cb(min(99, int(written * 100 / total)))
-        resp.close()
 
-        if first_chunk.startswith(b"PK"):
-            os.replace(tmp_path, dest_path)
-            if progress_cb:
-                progress_cb(100)
-            return dest_path
+                if resp.status_code != 200:
+                    last_err = f"HTTP {resp.status_code}"
+                    resp.close()
+                    break
 
-        # Not a valid xlsx (probably HTML viewer/error page) -> try next candidate
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
-        last_err = "Phản hồi không phải file .xlsx"
+                total = int(resp.headers.get("Content-Length") or 0)
+                written = 0
+                first_chunk = b""
+                with open(tmp_path, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=65536):
+                        if not chunk:
+                            continue
+                        if not first_chunk:
+                            first_chunk = chunk[:4]
+                        f.write(chunk)
+                        written += len(chunk)
+                        if progress_cb and total > 0:
+                            progress_cb(min(99, int(written * 100 / total)))
+                resp.close()
+                resp = None
+
+                if first_chunk.startswith(b"PK"):
+                    os.replace(tmp_path, dest_path)
+                    if progress_cb:
+                        progress_cb(100)
+                    return dest_path
+
+                # Not a valid xlsx (probably HTML viewer/error page) -> try next candidate
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+                last_err = "Phản hồi không phải file .xlsx"
+                break
+            except SessionExpiredError:
+                raise
+            except requests.RequestException as exc:
+                last_err = str(exc)
+                if resp is not None:
+                    try:
+                        resp.close()
+                    except Exception:
+                        pass
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass
+                continue
 
     raise RuntimeError(f"Không tải được file từ SharePoint ({last_err or 'lỗi không xác định'}).")
 
