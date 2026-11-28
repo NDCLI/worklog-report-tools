@@ -2239,15 +2239,7 @@ def _build_reviewer_audit(
         dist_by_sheet[str(dj.sheet_name).strip().upper()].append(dj)
 
     def _dist_task_segments(wb_blk: WorklogBlockRecord, base_task: str) -> List[DistributionJobRecord]:
-        # 1. Prefer resolving by recorded Job ID inside the same mode sheet (prevents false alarms when col E Job Name is stale/copied)
-        sheet_segs = dist_by_sheet.get(base_task, [])
-        if wb_blk.job_id and sheet_segs:
-            same_id = [s for s in sheet_segs if s.job_id == wb_blk.job_id]
-            if same_id:
-                ctid = same_id[0].cvat_task_id
-                tkey = same_id[0].task_name_key
-                return [s for s in sheet_segs if (ctid and s.cvat_task_id == ctid) or (not ctid and s.task_name_key == tkey)]
-        # 2. Fallback: resolve by Job/Task Name
+        # 1. Prefer resolving by Job/Task Name first so we always check against the right task
         tn = normalize_job_name(wb_blk.job_name)
         if tn and tn in dist_by_tn:
             return dist_by_tn[tn]
@@ -2258,6 +2250,14 @@ def _build_reviewer_audit(
             hits = [k for k in dist_by_tn if k in tn or tn in k]
             if len(hits) == 1:
                 return dist_by_tn[hits[0]]
+        # 2. Fallback: resolve by recorded Job ID inside the same mode sheet (when col E Job Name is empty/unrecognized)
+        sheet_segs = dist_by_sheet.get(base_task, [])
+        if wb_blk.job_id and sheet_segs:
+            same_id = [s for s in sheet_segs if s.job_id == wb_blk.job_id]
+            if same_id:
+                ctid = same_id[0].cvat_task_id
+                tkey = same_id[0].task_name_key
+                return [s for s in sheet_segs if (ctid and s.cvat_task_id == ctid) or (not ctid and s.task_name_key == tkey)]
         return []
 
     def _seg_range(segs: List[DistributionJobRecord]) -> str:
