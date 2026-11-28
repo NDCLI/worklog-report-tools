@@ -2288,6 +2288,18 @@ def _build_reviewer_audit(
         )
         frame_wrong = False
         if not id_ok:
+            if not rec_segs and wb_blk.job_id:
+                sheet_segs = dist_by_sheet.get(base_task, [])
+                other_segs = [s for s in sheet_segs if s.job_id == wb_blk.job_id]
+                if other_segs and any(s.start_frame <= sf <= s.end_frame for s in other_segs) and any(
+                    s.start_frame <= ef <= s.end_frame for s in other_segs
+                ):
+                    actual_tn = other_segs[0].task_name or other_segs[0].task_name_key
+                    raw_first = str(wb_blk.job_name or "").splitlines()[0].strip() if wb_blk.job_name else "(trống)"
+                    issues.append(
+                        f"Sai Task Name WL Inspector: ghi '{raw_first}', đúng là '{actual_tn}' (Job {wb_blk.job_id})"
+                    )
+                    return issues
             rec_is_ann = bool(ann_keys) and any(set(s.assignee_keys) & ann_keys for s in rec_segs)
             frm_is_ann = owner is not None and bool(ann_keys) and bool(set(owner.assignee_keys) & ann_keys)
             if rec_segs and rec_is_ann and not frm_is_ann:
