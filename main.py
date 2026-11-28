@@ -87,7 +87,7 @@ from updater import (
 
 
 APP_NAME = "Annotator & Inspector Report"
-APP_VERSION = "2.12"
+APP_VERSION = "2.13"
 
 DEFAULT_SP_WL_URL = (
     "https://hanwhaworkplace.sharepoint.com/:x:/r/sites/HVV-AILabAnnotation/"
@@ -2687,11 +2687,42 @@ class MainWindow(QMainWindow):
 
     def _render_audit_summary(self, table: QTableWidget, rows, status: str, *, inspector: bool, select_key=None):
         previous = self._selected_audit_summary(table)
-        key_to_restore = select_key if select_key is not None else (previous[0] if previous else None)
-        headers = ["Task", "Inspector" if inspector else "Annotator", "Trạng thái", "Dòng cần xử lý"]
+        key_to_restore = select_key[0] if isinstance(select_key, tuple) else (select_key if select_key is not None else (previous[0] if previous else None))
+        headers = ["Inspector" if inspector else "Annotator", "Task liên quan", "Trạng thái", "Cần xử lý"]
         visible_rows = [row for row in rows if not status or row.status_kind == status]
         t = self.theme
         restore_index = None
+
+        grouped = {}
+        for row in visible_rows:
+            person, person_key = (row.inspector, row.inspector_key) if inspector else (row.annotator, row.annotator_key)
+            issues = [d for d in row.daily_diffs if d.kind in ("mismatch", "pending_rework")]
+            issues.sort(key=lambda d: d.is_pending)
+            if not inspector:
+                issues = _merge_job_id_diff_rows(issues)
+            entry = grouped.setdefault(person_key, {
+                "person": person,
+                "tasks_with_issues": [],
+                "all_tasks": [],
+                "issues": [],
+                "has_mismatch": False,
+                "has_pending": False,
+                "only_bbox": True,
+                "linked": False,
+            })
+            if row.task not in entry["all_tasks"]:
+                entry["all_tasks"].append(row.task)
+            if issues and row.task not in entry["tasks_with_issues"]:
+                entry["tasks_with_issues"].append(row.task)
+            entry["issues"].extend(issues)
+            if row.status_kind == "mismatch":
+                entry["has_mismatch"] = True
+            elif row.status_kind == "pending":
+                entry["has_pending"] = True
+                if inspector or not all(d.is_missing_bbox for d in issues):
+                    entry["only_bbox"] = False
+            if not inspector and (person_key, row.task) == self._linked_audit_key:
+                entry["linked"] = True
 
         with QSignalBlocker(table):
             table.clearSelection()
@@ -2699,29 +2730,38 @@ class MainWindow(QMainWindow):
             table.clearContents()
             table.setColumnCount(len(headers))
             table.setHorizontalHeaderLabels(headers)
-            table.setRowCount(len(visible_rows))
-            for i, row in enumerate(visible_rows):
-                person, person_key = (row.inspector, row.inspector_key) if inspector else (row.annotator, row.annotator_key)
-                key = (person_key, row.task)
-                issues = [d for d in row.daily_diffs if d.kind in ("mismatch", "pending_rework")]
+            has_all = len(grouped) > 0
+            table.setRowCount(len(grouped) + (1 if has_all else 0))
+            all_issues = []
+            for idx, (person_key, entry) in enumerate(grouped.items()):
+                i = idx + (1 if has_all else 0)
+                person = entry["person"]
+                issues = entry["issues"]
                 issues.sort(key=lambda d: d.is_pending)
-                if not inspector:
-                    issues = _merge_job_id_diff_rows(issues)
-                if row.status_kind == "mismatch":
+                all_issues.extend(issues)
+                if entry["has_mismatch"]:
                     label, fg, tint = "⚠ KHÔNG KHỚP", t["warn"], t["warn_soft"]
-                elif row.status_kind == "pending":
-                    only_bbox = not inspector and all(d.is_missing_bbox for d in issues)
-                    label = "⏳ Chưa nhập BBOX" if only_bbox else "⏳ Chưa có data"
+                elif entry["has_pending"]:
+                    label = "⏳ Chưa nhập BBOX" if entry["only_bbox"] else "⏳ Chưa có data"
                     fg, tint = t["accent_text"], t["accent_soft"]
                 else:
                     label, fg, tint = "✓ Khớp", t["success"], t["success_soft"]
-                tip = "Mở từ báo cáo Inspector; không đổi bộ lọc Annotator." if not inspector and key == self._linked_audit_key else ""
-                table.setItem(i, 0, self._make_item(row.task, bold=True, tooltip=tip, user_data=(key, person, issues)))
-                table.setItem(i, 1, self._make_item(person, bold=True, tooltip=tip))
+                tasks_lbl = ", ".join(entry["tasks_with_issues"] or entry["all_tasks"])
+                tip = "Mở từ báo cáo Inspector; không đổi bộ lọc Annotator." if entry["linked"] else ""
+                table.setItem(i, 0, self._make_item(person, bold=True, tooltip=tip, user_data=((person_key, tasks_lbl), person, issues)))
+                table.setItem(i, 1, self._make_item(tasks_lbl, bold=False, fg=t["text_muted"], tooltip=tip))
                 table.setItem(i, 2, self._make_item(label, bold=True, fg=fg, bg=tint))
                 table.setItem(i, 3, self._make_item(_fmt_int(len(issues)), bold=bool(issues), fg=fg if issues else t["text_muted"]))
-                if key == key_to_restore:
+                if person_key == key_to_restore:
                     restore_index = i
+            if has_all:
+                all_fg = t["warn"] if all_issues else t["text_muted"]
+                table.setItem(0, 0, self._make_item("Tất cả", bold=True, user_data=(("__ALL__", "Tất cả"), "Tất cả", all_issues)))
+                table.setItem(0, 1, self._make_item("Tất cả", bold=False, fg=t["text_muted"]))
+                table.setItem(0, 2, self._make_item("Tất cả", bold=True, fg=t["accent_text"], bg=t["accent_soft"]))
+                table.setItem(0, 3, self._make_item(_fmt_int(len(all_issues)), bold=bool(all_issues), fg=all_fg))
+                if restore_index is None:
+                    restore_index = 0
             if restore_index is not None:
                 table.setCurrentCell(restore_index, 0)
 
