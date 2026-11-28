@@ -87,7 +87,7 @@ from updater import (
 
 
 APP_NAME = "Annotator & Inspector Report"
-APP_VERSION = "2.13"
+APP_VERSION = "2.14"
 
 DEFAULT_SP_WL_URL = (
     "https://hanwhaworkplace.sharepoint.com/:x:/r/sites/HVV-AILabAnnotation/"
@@ -2730,15 +2730,11 @@ class MainWindow(QMainWindow):
             table.clearContents()
             table.setColumnCount(len(headers))
             table.setHorizontalHeaderLabels(headers)
-            has_all = len(grouped) > 0
-            table.setRowCount(len(grouped) + (1 if has_all else 0))
-            all_issues = []
-            for idx, (person_key, entry) in enumerate(grouped.items()):
-                i = idx + (1 if has_all else 0)
+            table.setRowCount(len(grouped))
+            for i, (person_key, entry) in enumerate(grouped.items()):
                 person = entry["person"]
                 issues = entry["issues"]
                 issues.sort(key=lambda d: d.is_pending)
-                all_issues.extend(issues)
                 if entry["has_mismatch"]:
                     label, fg, tint = "⚠ KHÔNG KHỚP", t["warn"], t["warn_soft"]
                 elif entry["has_pending"]:
@@ -2754,14 +2750,6 @@ class MainWindow(QMainWindow):
                 table.setItem(i, 3, self._make_item(_fmt_int(len(issues)), bold=bool(issues), fg=fg if issues else t["text_muted"]))
                 if person_key == key_to_restore:
                     restore_index = i
-            if has_all:
-                all_fg = t["warn"] if all_issues else t["text_muted"]
-                table.setItem(0, 0, self._make_item("Tất cả", bold=True, user_data=(("__ALL__", "Tất cả"), "Tất cả", all_issues)))
-                table.setItem(0, 1, self._make_item("Tất cả", bold=False, fg=t["text_muted"]))
-                table.setItem(0, 2, self._make_item("Tất cả", bold=True, fg=t["accent_text"], bg=t["accent_soft"]))
-                table.setItem(0, 3, self._make_item(_fmt_int(len(all_issues)), bold=bool(all_issues), fg=all_fg))
-                if restore_index is None:
-                    restore_index = 0
             if restore_index is not None:
                 table.setCurrentCell(restore_index, 0)
 
